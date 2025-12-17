@@ -27,6 +27,10 @@ class Camera:
     world_width: int = 0
     world_height: int = 0
     
+    # Centering offset
+    center_offset_x: float = 0.0
+    center_offset_y: float = 0.0
+    
     # Shake effect
     shake_amount: float = 0.0
     shake_decay: float = 5.0
@@ -40,15 +44,30 @@ class Camera:
         if self.shake_amount > 0:
             self.shake_amount = max(0, self.shake_amount - self.shake_decay * dt)
         
-        # Clamp to bounds
+        # Clamp to bounds or Calculate centering
         if self.world_width > 0:
-            self.x = max(0, min(self.world_width - self.view_width, self.x))
+            if self.world_width < self.view_width:
+                # Center horizontally
+                self.center_offset_x = (self.view_width - self.world_width) // 2
+                self.x = -self.center_offset_x  # Effectively ignores target_x logic for centering
+            else:
+                self.center_offset_x = 0
+                self.x = max(0, min(self.world_width - self.view_width, self.x))
+                
         if self.world_height > 0:
-            self.y = max(0, min(self.world_height - self.view_height, self.y))
+            if self.world_height < self.view_height:
+                # Center vertically
+                self.center_offset_y = (self.view_height - self.world_height) // 2
+                self.y = -self.center_offset_y
+            else:
+                self.center_offset_y = 0
+                self.y = max(0, min(self.world_height - self.view_height, self.y))
     
     def set_target(self, x: float, y: float):
-        self.target_x = x - self.view_width // 2
-        self.target_y = y - self.view_height // 2
+        if self.world_width >= self.view_width:
+            self.target_x = x - self.view_width // 2
+        if self.world_height >= self.view_height:
+            self.target_y = y - self.view_height // 2
     
     def add_shake(self, amount: float):
         self.shake_amount = min(20.0, self.shake_amount + amount)
@@ -64,6 +83,9 @@ class Camera:
     
     def world_to_screen(self, world_x: float, world_y: float) -> Tuple[int, int]:
         shake_x, shake_y = self.get_shake_offset()
+        # Note: self.x/y already include the negative offset if centering is active
+        # because we set self.x = -offset.
+        # So (world_x - self.x) becomes (world_x - (-offset)) = world_x + offset
         return (int(world_x - self.x + shake_x), int(world_y - self.y + shake_y))
     
     def is_visible(self, world_x: float, world_y: float, 
@@ -256,9 +278,9 @@ class Renderer:
     def _render_notifications(self, screen: pygame.Surface):
         """Draw active notifications stacking up."""
         x = SCREEN_WIDTH // 2
-        y = SCREEN_HEIGHT - 100
+        y = 100  # Moved to top
         
-        for text, time_left, color in reversed(self.notifications):
+        for text, time_left, color in self.notifications:
             # Fade out
             alpha = min(255, int(time_left * 255))
             if time_left > 1.0: alpha = 255
@@ -275,7 +297,7 @@ class Renderer:
             screen.blit(shadow, shadow_rect)
             screen.blit(surf, rect)
             
-            y -= 40
+            y += 40  # Stack downwards
     
     def _draw_background(self, screen: pygame.Surface):
         """Draw gradient background."""
@@ -451,25 +473,34 @@ class Renderer:
     
     def _draw_exit(self, surface: pygame.Surface, x: int, y: int):
         """Draw pulsing exit."""
-        pulse = math.sin(self.pulse_time * 1.5) * 0.3 + 0.7
+        pulse = math.sin(self.pulse_time * 2.0) * 0.2 + 0.8
+        
+        # Outer glow
+        glow_surf = pygame.Surface((TILE_SIZE * 2, TILE_SIZE * 2), pygame.SRCALPHA)
+        glow_radius = int(TILE_SIZE * 0.8 * pulse)
+        pygame.draw.circle(glow_surf, (*COLORS.EXIT[:3], 50), (TILE_SIZE, TILE_SIZE), glow_radius)
+        surface.blit(glow_surf, (x - TILE_SIZE // 2, y - TILE_SIZE // 2))
+        
         color = tuple(int(c * pulse) for c in COLORS.EXIT)
         
-        pygame.draw.rect(surface, color, (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8))
-        pygame.draw.rect(surface, (255, 255, 255), 
-                        (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8), 2)
+        # Main Platform
+        rect = (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8)
+        pygame.draw.rect(surface, color, rect, border_radius=4)
+        pygame.draw.rect(surface, (255, 255, 255), rect, 2, border_radius=4)
         
-        # Arrow
+        # Upward Arrow Animation
+        arrow_y_offset = (self.time * 20) % 10 - 5
         center_x = x + TILE_SIZE // 2
-        center_y = y + TILE_SIZE // 2
-        pygame.draw.polygon(surface, (255, 255, 255), [
-            (center_x, y + 10),
-            (center_x + 10, center_y),
-            (center_x + 4, center_y),
-            (center_x + 4, y + TILE_SIZE - 10),
-            (center_x - 4, y + TILE_SIZE - 10),
-            (center_x - 4, center_y),
-            (center_x - 10, center_y),
-        ])
+        center_y = y + TILE_SIZE // 2 + arrow_y_offset
+        
+        # Draw Arrow
+        points = [
+            (center_x, center_y - 6),
+            (center_x + 6, center_y + 2),
+            (center_x - 6, center_y + 2)
+        ]
+        pygame.draw.polygon(surface, (255, 255, 255), points)
+        pygame.draw.rect(surface, (255, 255, 255), (center_x - 2, center_y + 2, 4, 6))
     
     def _draw_spawn(self, surface: pygame.Surface, x: int, y: int):
         pygame.draw.circle(surface, COLORS.SPAWN, 
@@ -506,6 +537,14 @@ class Renderer:
         player = self.game.player
         if not player:
             return
+        
+        # Blink effect if invulnerable
+        if getattr(player, 'invulnerable_timer', 0) > 0:
+            # Blink every 0.1s
+            if int(self.time * 20) % 2 == 0:
+                pass # Continue rendering but maybe transparent?
+            else:
+                return # Skip rendering for blink effect
         
         world_x = player.x * TILE_SIZE
         world_y = player.y * TILE_SIZE
@@ -619,47 +658,106 @@ class Renderer:
         if not player:
             return
         
-        # UI Panel background
-        panel_height = 70
-        panel = pygame.Surface((300, panel_height), pygame.SRCALPHA)
-        pygame.draw.rect(panel, (*COLORS.UI_BG, 200), (0, 0, 300, panel_height), border_radius=8)
-        pygame.draw.rect(panel, COLORS.UI_BORDER, (0, 0, 300, panel_height), 2, border_radius=8)
-        screen.blit(panel, (15, SCREEN_HEIGHT - panel_height - 15))
+        # UI Panel background (Glassmorphism)
+        panel_width = 340
+        panel_height = 90
+        panel_x = 20
+        panel_y = SCREEN_HEIGHT - panel_height - 20
         
-        base_x = 25
-        base_y = SCREEN_HEIGHT - panel_height
+        # Blur/Glass effect backing
+        s = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
+        s.fill((10, 15, 25, 220))  # Dark blue semi-transparent
+        screen.blit(s, (panel_x, panel_y))
         
-        # Health hearts
+        # Tech border
+        pygame.draw.rect(screen, COLORS.UI_BORDER, (panel_x, panel_y, panel_width, panel_height), 2, border_radius=10)
+        # Corner accents
+        accent_len = 15
+        pygame.draw.line(screen, COLORS.UI_ENERGY, (panel_x, panel_y), (panel_x + accent_len, panel_y), 2)
+        pygame.draw.line(screen, COLORS.UI_ENERGY, (panel_x, panel_y), (panel_x, panel_y + accent_len), 2)
+        pygame.draw.line(screen, COLORS.UI_ENERGY, (panel_x + panel_width - accent_len, panel_y + panel_height), (panel_x + panel_width, panel_y + panel_height), 2)
+        pygame.draw.line(screen, COLORS.UI_ENERGY, (panel_x + panel_width, panel_y + panel_height - accent_len), (panel_x + panel_width, panel_y + panel_height), 2)
+
+        base_x = panel_x + 20
+        base_y = panel_y + 15
+        
+        # Health (Tech Blocks)
+        hp_label = self.game.font_tiny.render("VITALS", True, COLORS.UI_TEXT_DIM)
+        screen.blit(hp_label, (base_x, base_y))
+        
         for i in range(player.max_health):
-            heart_x = base_x + i * 28
-            heart_y = base_y + 10
-            color = COLORS.UI_HEALTH if i < player.health else (60, 40, 50)
-            self._draw_heart(screen, heart_x, heart_y, color)
+            block_w = 25
+            block_h = 10
+            spacing = 5
+            x = base_x + i * (block_w + spacing)
+            y = base_y + 15
+            
+            color = COLORS.UI_HEALTH if i < player.health else (40, 20, 20)
+            pygame.draw.rect(screen, color, (x, y, block_w, block_h))
+            if i < player.health:
+                # Glow
+                pygame.draw.rect(screen, (255, 100, 100), (x, y, block_w, 2))
         
-        # Energy bar
+        # Energy Bar (Tech Style)
+        en_label = self.game.font_tiny.render("ENERGY", True, COLORS.UI_TEXT_DIM)
+        screen.blit(en_label, (base_x, base_y + 35))
+        
         bar_x = base_x
-        bar_y = base_y + 35
-        bar_width = 200
-        bar_height = 12
+        bar_y = base_y + 50
+        bar_width = 180
+        bar_height = 6
         
+        # Track
+        pygame.draw.rect(screen, (20, 30, 40), (bar_x, bar_y, bar_width, bar_height))
+        
+        # Fill
         energy_ratio = player.energy / player.max_energy
-        pygame.draw.rect(screen, (30, 40, 50), (bar_x, bar_y, bar_width, bar_height), border_radius=3)
-        pygame.draw.rect(screen, COLORS.UI_ENERGY, 
-                        (bar_x, bar_y, int(bar_width * energy_ratio), bar_height), border_radius=3)
-        pygame.draw.rect(screen, COLORS.UI_BORDER, (bar_x, bar_y, bar_width, bar_height), 1, border_radius=3)
+        fill_width = int(bar_width * energy_ratio)
+        if fill_width > 0:
+            pygame.draw.rect(screen, COLORS.UI_ENERGY, (bar_x, bar_y, fill_width, bar_height))
+            # Moving shine on bar
+            shine_x = bar_x + (int(self.time * 100) % bar_width)
+            if shine_x < bar_x + fill_width:
+                 pygame.draw.rect(screen, (255, 255, 255, 200), (shine_x, bar_y, 5, bar_height))
+
+        # Key Inventory (Right Side)
+        key_box_x = panel_x + 250
+        key_box_y = panel_y + 20
+        box_size = 50
         
-        # Key count
-        key_x = base_x + 220
-        key_y = base_y + 18
-        pygame.draw.circle(screen, COLORS.KEY, (key_x, key_y), 8)
-        key_text = self.game.font_small.render(f"x{player.keys}", True, COLORS.UI_TEXT)
-        screen.blit(key_text, (key_x + 12, key_y - 10))
+        # Box frame
+        pygame.draw.rect(screen, (15, 20, 30), (key_box_x, key_box_y, box_size, box_size), border_radius=5)
+        pygame.draw.rect(screen, COLORS.UI_BORDER, (key_box_x, key_box_y, box_size, box_size), 1, border_radius=5)
         
-        # Stealth indicator
+        # Key Label
+        key_label = self.game.font_tiny.render("ACCESS", True, COLORS.UI_TEXT_DIM)
+        screen.blit(key_label, (key_box_x + 5, key_box_y + box_size + 2))
+        
+        if player.keys > 0:
+            # Draw big key icon
+            cx, cy = key_box_x + box_size // 2, key_box_y + box_size // 2
+            pulse = 1.0 + math.sin(self.time * 5) * 0.1
+            
+            # Glow
+            glow_surf = pygame.Surface((40, 40), pygame.SRCALPHA)
+            pygame.draw.circle(glow_surf, (*COLORS.KEY[:3], 50), (20, 20), 15 * pulse)
+            screen.blit(glow_surf, (cx - 20, cy - 20))
+            
+            # Key
+            rect_w = 6
+            rect_h = 24
+            pygame.draw.circle(screen, COLORS.KEY, (cx, cy - 5), 8)
+            pygame.draw.rect(screen, COLORS.KEY, (cx - rect_w//2, cy, rect_w, rect_h))
+            pygame.draw.rect(screen, COLORS.KEY, (cx, cy + 10, 8, 4))
+            pygame.draw.rect(screen, COLORS.KEY, (cx, cy + 16, 6, 4))
+        
+        # Stealth Text overlay (Center Screen, not HUD panel)
         if getattr(player, 'is_stealthed', False):
-            stealth_text = self.game.font_medium.render("STEALTH", True, COLORS.UI_STEALTH)
-            stealth_rect = stealth_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 50))
-            screen.blit(stealth_text, stealth_rect)
+            stealth_text = self.game.font_medium.render("-- STEALTH MODE --", True, COLORS.UI_STEALTH)
+            rect = stealth_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 120))
+            # Blink
+            if int(self.time * 4) % 2 == 0:
+                screen.blit(stealth_text, rect)
     
     def _draw_heart(self, surface: pygame.Surface, x: int, y: int, color: Tuple):
         """Draw a heart shape."""

@@ -10,13 +10,13 @@ from typing import Tuple
 # =============================================================================
 # DISPLAY SETTINGS
 # =============================================================================
-SCREEN_WIDTH = 1920
-SCREEN_HEIGHT = 1080
+SCREEN_WIDTH = 1280
+SCREEN_HEIGHT = 720
 TARGET_FPS = 144
 WINDOW_TITLE = "Maze Bourne"
 
 # Tile/Grid Settings
-TILE_SIZE = 48  # Larger tiles for better visibility at 1080p
+TILE_SIZE = 40  # Optimized for 720p (32x18 tiles fit)
 GRID_LINE_WIDTH = 1
 
 # Camera
@@ -47,6 +47,8 @@ class Colors:
     ENEMY_TRACKER = (200, 100, 50)     # Orange - tracker bots
     ENEMY_SOUND = (200, 180, 50)       # Yellow - sound hunters
     ENEMY_SIGHT = (150, 50, 180)       # Purple - sight guards
+    ENEMY_GUARD = (150, 50, 180)       # Purple - Guard (Same as Sight)
+    ENEMY_HUNTER = (200, 180, 50)      # Yellow - Hunter (Same as Sound)
     ENEMY_ALERT = (255, 100, 100)      # Bright red when alerted
     
     # Interactive Objects
@@ -88,7 +90,7 @@ COLORS = Colors()
 PLAYER_SPEED = 5.0  # Tiles per second
 PLAYER_HEALTH = 3
 PLAYER_MAX_ENERGY = 100.0
-PLAYER_ENERGY_REGEN = 10.0  # Per second
+PLAYER_ENERGY_REGEN = 5.0  # Slower regen (was 10.0)
 
 # Stealth
 STEALTH_VISIBILITY_MULT = 0.3  # 70% less visible
@@ -99,7 +101,7 @@ STEALTH_SPEED_MULT = 0.6       # 40% slower
 DASH_DISTANCE = 3  # Tiles
 DASH_DURATION = 0.15  # Seconds
 DASH_COOLDOWN = 2.0  # Seconds
-DASH_ENERGY_COST = 25.0
+DASH_ENERGY_COST = 40.0  # Higher cost (was 25.0)
 
 # Noise generation
 NOISE_WALK = 30
@@ -220,6 +222,9 @@ class GameState(Enum):
     VICTORY = auto()
     LEVEL_COMPLETE = auto()
     EDITOR = auto()
+    SETTINGS = auto()
+    HELP = auto()
+    CREDITS = auto()
 
 # =============================================================================
 # INPUT MAPPINGS (can be customized later)

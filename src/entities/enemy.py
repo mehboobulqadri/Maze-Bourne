@@ -142,6 +142,25 @@ class Enemy:
         # Store game reference for later use
         self._game = game
         
+        # Get dynamic settings
+        speed_mult = 1.0
+        vision_mult = 1.0
+        smartness = 1.0
+        
+        if hasattr(game, 'settings_manager'):
+            speed_mult = game.settings_manager.get("gameplay", "enemy_speed_multiplier") or 1.0
+            # Vision multiplier - maybe not expose directly but derive from difficulty?
+            # For now stick to speed and smartness as primary toggles
+            smartness = game.settings_manager.get("gameplay", "enemy_smartness") or 1.0
+            
+        # Apply multipliers
+        self.current_speed = self.speed * speed_mult
+        self.current_vision_range = self.vision_range * vision_mult
+        self.current_smartness = smartness
+        
+        # Update move cooldown based on speed (tiles per second -> seconds per tile)
+        self.move_cooldown = 1.0 / max(0.1, self.current_speed)
+        
         # Run behavior based on current state
         if self.state == EnemyState.IDLE:
             self._update_idle(dt, player, level)
@@ -162,6 +181,14 @@ class Enemy:
         """Change to a new behavior state."""
         self.state = new_state
         self.state_timer = 0.0
+        
+        # Smartness affects duration
+        # Smarter enemies search longer, alert quicker (though alert duration is fixed transition usually)
+        if new_state == EnemyState.SEARCH:
+            # Base duration * smartness
+            smartness = getattr(self, 'current_smartness', 1.0)
+            duration *= smartness
+            
         self.state_duration = duration
     
     def _can_move(self) -> bool:
@@ -373,7 +400,12 @@ class Enemy:
             self.last_known_player_pos = GridPos(player.x, player.y)
         
         # Short alert then chase
-        if self.state_timer > 0.5:
+        # Reaction time based on smartness (Default 0.5s)
+        # Smartness 2.0 -> 0.25s
+        # Smartness 0.5 -> 1.0s
+        reaction_time = 0.5 / max(0.1, getattr(self, 'current_smartness', 1.0))
+        
+        if self.state_timer > reaction_time:
             self._change_state(EnemyState.CHASE)
     
     def _update_search(self, dt: float, player, level):

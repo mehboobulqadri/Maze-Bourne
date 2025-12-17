@@ -142,6 +142,9 @@ class MazeBourneEnv(gym.Env):
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
         """Execute one step in the environment."""
+        if isinstance(action, np.ndarray):
+            action = int(action.item())
+        
         self.steps += 1
         reward = RL_CONFIG["penalty_time"]  # Small time penalty
         terminated = False

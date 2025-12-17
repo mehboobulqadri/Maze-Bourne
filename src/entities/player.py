@@ -43,6 +43,9 @@ class Player:
         self.dash_cooldown_timer = 0.0
         self.dash_direction = (0, 0)
         
+        # Invulnerability
+        self.invulnerable_timer = 0.0
+        
         # Inventory
         self.keys = 0
         
@@ -55,7 +58,7 @@ class Player:
         self._handle_input(game)
         
         # Update dash
-        self._update_dash(dt)
+        self._update_dash(dt, game.level)
         
         # Calculate speed
         current_speed = self.speed
@@ -92,9 +95,68 @@ class Player:
         # Update dash cooldown
         if self.dash_cooldown_timer > 0:
             self.dash_cooldown_timer -= dt
+            
+        # Update invulnerability
+        if self.invulnerable_timer > 0:
+            self.invulnerable_timer -= dt
         
         # Check for interactions
         self._check_interactions(game)
+
+    # ... (collision check remains) ...
+
+    def _update_dash(self, dt: float, level):
+        """Update dash movement with collision check."""
+        if not self.is_dashing:
+            return
+        
+        self.dash_timer -= dt
+        if self.dash_timer <= 0:
+            self.is_dashing = False
+            return
+        
+        # Move in dash direction but check collision
+        dash_speed = DASH_DISTANCE / DASH_DURATION
+        dx = self.dash_direction[0] * dash_speed * dt
+        dy = self.dash_direction[1] * dash_speed * dt
+        
+        # Continuous collision detection (steps)
+        # Simple step check: if next pos is wall, stop dash
+        steps = 5
+        for i in range(steps):
+             step_x = dx / steps
+             step_y = dy / steps
+             
+             if self._check_collision(self.x + step_x, self.y + step_y, level):
+                 self.x += step_x
+                 self.y += step_y
+             else:
+                 # Hit wall, stop dash
+                 self.is_dashing = False
+                 self.dash_timer = 0
+                 break
+    
+    # ... (rest of methods) ...
+
+    def take_damage(self, amount: int, game):
+        """Take damage and check for death."""
+        if self.invulnerable_timer > 0:
+            return
+            
+        self.health -= amount
+        self.invulnerable_timer = 2.0  # 2 seconds i-frames
+        
+        if game.renderer:
+            from src.core.constants import COLORS
+            game.renderer.add_notification("Damage Taken!", COLORS.TRAP)
+            game.renderer.camera.add_shake(10.0)
+        
+        if hasattr(game, 'audio_manager'):
+            game.audio_manager.play_sound("sfx_alert", 1.0)
+            
+        if self.health <= 0:
+            from src.core.constants import GameState
+            game.change_state(GameState.GAME_OVER)
 
     def _check_collision(self, x: float, y: float, level) -> bool:
         """
@@ -169,11 +231,11 @@ class Player:
         # Dash
         for key in CONTROLS["dash"]:
             if game.is_key_just_pressed(key):
-                self._try_dash()
+                self._try_dash(game)
                 break
 
     
-    def _try_dash(self):
+    def _try_dash(self, game):
         """Attempt to dash."""
         if self.dash_cooldown_timer > 0:
             return
@@ -187,9 +249,13 @@ class Player:
         self.dash_direction = self._move_input
         self.energy -= DASH_ENERGY_COST
         self.dash_cooldown_timer = DASH_COOLDOWN
+        
+        # Play sound
+        if hasattr(game, 'audio_manager'):
+            game.audio_manager.play_sound("sfx_dash")
     
-    def _update_dash(self, dt: float):
-        """Update dash movement."""
+    def _update_dash(self, dt: float, level):
+        """Update dash movement with collision check."""
         if not self.is_dashing:
             return
         
@@ -198,10 +264,25 @@ class Player:
             self.is_dashing = False
             return
         
-        # Move in dash direction
+        # Move in dash direction but check collision
         dash_speed = DASH_DISTANCE / DASH_DURATION
-        self.x += self.dash_direction[0] * dash_speed * dt
-        self.y += self.dash_direction[1] * dash_speed * dt
+        dx = self.dash_direction[0] * dash_speed * dt
+        dy = self.dash_direction[1] * dash_speed * dt
+        
+        # Continuous collision detection (steps)
+        steps = 5
+        for i in range(steps):
+             step_x = dx / steps
+             step_y = dy / steps
+             
+             if self._check_collision(self.x + step_x, self.y + step_y, level):
+                 self.x += step_x
+                 self.y += step_y
+             else:
+                 # Hit wall, stop dash
+                 self.is_dashing = False
+                 self.dash_timer = 0
+                 break
     
     def _check_interactions(self, game):
         """Check for and handle interactions with objects."""
@@ -223,13 +304,24 @@ class Player:
             game.level.collect_key(cx, cy)
             if game.renderer:
                 game.renderer.add_notification("Key Collected!", COLORS.KEY)
+            if hasattr(game, 'audio_manager'):
+                game.audio_manager.play_sound("sfx_ui_select", 1.2)
         
         # Check for exit
         if cell.cell_type == CellType.EXIT:
             from src.core.constants import GameState
-            if game.renderer:
-                game.renderer.add_notification("Level Complete!", COLORS.EXIT)
-            game.change_state(GameState.VICTORY)
+            
+            if self.keys > 0:
+                if game.renderer:
+                    game.renderer.add_notification("Level Complete!", COLORS.EXIT)
+                if hasattr(game, 'audio_manager'):
+                    game.audio_manager.play_sound("sfx_ui_select", 1.5)
+                game.change_state(GameState.VICTORY)
+            else:
+                if game.renderer:
+                    game.renderer.add_notification("Locked! Find the Key", COLORS.UI_TEXT_DIM)
+                if hasattr(game, 'audio_manager'):
+                    game.audio_manager.play_sound("sfx_ui_hover", 1.0)
         
         # Check for trap damage
         if cell.cell_type == CellType.TRAP:
@@ -237,11 +329,19 @@ class Player:
     
     def take_damage(self, amount: int, game):
         """Take damage and check for death."""
+        if self.invulnerable_timer > 0:
+            return
+            
         self.health -= amount
+        self.invulnerable_timer = 2.0  # 2 seconds i-frames
+        
         if game.renderer:
             from src.core.constants import COLORS
             game.renderer.add_notification("Damage Taken!", COLORS.TRAP)
             game.renderer.camera.add_shake(10.0)
+        
+        if hasattr(game, 'audio_manager'):
+            game.audio_manager.play_sound("sfx_alert", 1.0)
             
         if self.health <= 0:
             from src.core.constants import GameState

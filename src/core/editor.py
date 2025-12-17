@@ -1,211 +1,227 @@
-"""
-Maze Bourne - Level Editor
-Allows creating and editing custom levels.
-"""
-
 import pygame
 import os
-from enum import Enum, auto
-from typing import Optional, Tuple
-
-from src.core.constants import (
-    SCREEN_WIDTH, SCREEN_HEIGHT, TILE_SIZE, COLORS, CellType
-)
-from src.levels.level import Level
-
-class EditorTool(Enum):
-    WALL = auto()
-    FLOOR = auto()
-    SPAWN = auto()
-    EXIT = auto()
-    KEY = auto()
-    DOOR = auto()
-    ENEMY_PATROL = auto()
-    ENEMY_GUARD = auto()
-    ENEMY_HUNTER = auto()
-    TRAP = auto()
+from src.core.constants import *
+from src.levels.level import Level, CellType, Cell
+from src.ui.ui_components import Button
 
 class Editor:
-    """
-    Level Editor state handler.
-    """
-    
     def __init__(self, game):
         self.game = game
-        self.grid_width = 25
-        self.grid_height = 20
-        self.camera_offset = [0, 0]
+        self.level = None
+        self.camera_x = 0
+        self.camera_y = 0
+        self.zoom = 1.0
         
         # Tools
-        self.current_tool = EditorTool.WALL
-        self.tools = list(EditorTool)
-        self.tool_index = 0
+        # Tuple: (Display Name, CellType/Logic)
+        self.tools = [
+            ("WALL", CellType.WALL),
+            ("FLOOR", CellType.FLOOR),
+            ("KEY", CellType.KEY),
+            ("DOOR", CellType.DOOR),
+            ("EXIT", CellType.EXIT),
+            ("SPAWN", CellType.SPAWN),
+            ("ENEMY", CellType.ENEMY_SPAWN),
+            ("TRAP", CellType.TRAP),
+            ("HIDE", CellType.HIDING_SPOT)
+        ]
+        self.selected_tool = self.tools[0][1] # Default Wall
         
         # UI
-        self.font = game.font_small
-        self.font_tiny = game.font_tiny
+        self.ui_buttons = []
+        self._init_ui()
         
-        # Current Level being edited
-        self.level = None
-        self.current_filename = "levels/level_1.json"
-    
+    def _init_ui(self):
+        cx = SCREEN_WIDTH - 150
+        y = 50
+        
+        # Save Button
+        self.ui_buttons.append(Button(cx, y, 120, 40, "SAVE", self.game.font_small, 
+                                      action=self.save_level, bg_color=COLORS.UI_ENERGY))
+        y += 50
+        
+        # Exit Button
+        self.ui_buttons.append(Button(cx, y, 120, 40, "EXIT", self.game.font_small, 
+                                      action=lambda: self.game.change_state(GameState.MENU)))
+        y += 60
+        
+        # Tool Palette
+        for name, tool_type in self.tools:
+            # We need to capture tool_type safely in lambda
+            btn = Button(cx, y, 120, 35, name, self.game.font_tiny, 
+                         action=lambda t=tool_type: self.select_tool(t))
+            self.ui_buttons.append(btn)
+            y += 40
+            
+    def select_tool(self, tool_type):
+        self.selected_tool = tool_type
+        if self.game.audio_manager:
+            self.game.audio_manager.play_sound("sfx_ui_select", 0.6)
+
     def enter(self):
-        """Enter editor state."""
-        print("[Editor] Entering Editor Mode")
-        # Try to load existing or create new
-        if os.path.exists(self.current_filename):
+        print("[Editor] Entering Drag & Drop Editor")
+        # Ensure we have a working level to edit
+        if not self.level:
+            # Load level 1 or create fresh
             try:
-                self.level = Level.load_from_file(self.current_filename)
-                print(f"[Editor] Loaded {self.current_filename}")
-            except Exception as e:
-                print(f"[Editor] Error loading {self.current_filename}: {e}")
-                self.level = Level(self.grid_width, self.grid_height)
-        else:
-            self.level = Level(self.grid_width, self.grid_height)
-            # Clear maze to empty floor or walls? Walls is safer/standard
-            self.level.generator._init_walls()
-            # Set default spawn/exit
-            self.level.cells[(1,1)].cell_type = CellType.FLOOR # Ensure spawn is floor
-            
-        # Ensure game renderer knows about this level
-        if self.game.renderer:
-            self.game.renderer.setup_for_level(self.level)
-    
+                self.level = Level.from_campaign(1)
+            except:
+                self.level = Level(25, 20)
+        
+        # Reset camera
+        self.camera_x = 0
+        self.camera_y = 0
+        pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_CROSSHAIR)
+        
     def update(self, dt: float):
-        """Update editor state."""
-        self._handle_input(dt)
-        
-    def _handle_input(self, dt: float):
-        """Handle mouse and keyboard interaction."""
-        # Tool Selection (Scroll or Number keys)
-        # 1-9 keys
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_1]: self.current_tool = EditorTool.WALL
-        if keys[pygame.K_2]: self.current_tool = EditorTool.FLOOR
-        if keys[pygame.K_3]: self.current_tool = EditorTool.SPAWN
-        if keys[pygame.K_4]: self.current_tool = EditorTool.EXIT
-        if keys[pygame.K_5]: self.current_tool = EditorTool.KEY
-        if keys[pygame.K_6]: self.current_tool = EditorTool.DOOR
-        if keys[pygame.K_7]: self.current_tool = EditorTool.ENEMY_PATROL
-        if keys[pygame.K_8]: self.current_tool = EditorTool.TRAP
-        
-        # Mouse Interaction
         mouse_pos = pygame.mouse.get_pos()
-        mouse_buttons = pygame.mouse.get_pressed()
+        mouse_click = pygame.mouse.get_pressed()[0]
+        right_click = pygame.mouse.get_pressed()[2]
         
-        # Convert screen to grid
-        # Assuming no camera pan for MVP (25x20 fits 800x600 with 32px tiles? 25*32=800. Fits width perfectly. Height 20*32=640. Screen is 600? might be cut off)
-        # Constants say TILE_SIZE=32? check constants. Assuming 32.
-        
-        gx = int(mouse_pos[0] // TILE_SIZE)
-        gy = int(mouse_pos[1] // TILE_SIZE)
-        
-        if 0 <= gx < self.level.width and 0 <= gy < self.level.height:
-            if mouse_buttons[0]: # Left Click = Place
-                self._place_tile(gx, gy)
-            elif mouse_buttons[2]: # Right Click = Erase (Wall)
-                self._place_tile(gx, gy, is_erase=True)
+        # UI Interaction (if mouse is in side panel)
+        if mouse_pos[0] > SCREEN_WIDTH - 200:
+            pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
+            if self.game.audio_manager:
+                manager = self.game.audio_manager
+            else:
+                manager = None
                 
-        # Save
-        if self.game.is_key_just_pressed(pygame.K_s):
-            self.level.save_to_file(self.current_filename)
-            if self.game.renderer:
-                self.game.renderer.add_notification("Level Saved!", COLORS.UI_HEALTH)
-                
-        # Play Test
-        if self.game.is_key_just_pressed(pygame.K_p):
-            # Save then play
-            self.level.save_to_file(self.current_filename)
-            self.game.current_level_num = 1 # Assuming file is level_1
-            self.game.reset_level_requested = True
-            from src.core.constants import GameState
-            self.game.change_state(GameState.PLAYING)
-            
-        # Return to Menu
-        if self.game.is_key_just_pressed(pygame.K_ESCAPE):
-            self.level.save_to_file(self.current_filename) # Auto save
-            from src.core.constants import GameState
-            self.game.change_state(GameState.MENU)
-
-    def _place_tile(self, x: int, y: int, is_erase: bool = False):
-        """Place current tool object at pos."""
-        from src.core.constants import CellType, EnemyType
+            for btn in self.ui_buttons:
+                btn.update(mouse_pos, mouse_click, manager)
+            return
         
-        cell = self.level.cells.get((x, y))
-        if not cell:
-            return
+        pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_CROSSHAIR)
+        
+        # Camera Pan (WASD)
+        speed = 500 * dt
+        if self.game.is_key_pressed(pygame.K_w): self.camera_y -= speed
+        if self.game.is_key_pressed(pygame.K_s): self.camera_y += speed
+        if self.game.is_key_pressed(pygame.K_a): self.camera_x -= speed
+        if self.game.is_key_pressed(pygame.K_d): self.camera_x += speed
+        
+        # Paint / Erase
+        # Calculate grid pos
+        # sx = (grid_x * TILE_SIZE) - camera_x
+        # mouse_x = screen_x
+        # grid_x = (mouse_x + camera_x) / TILE_SIZE
+        
+        grid_x = int((mouse_pos[0] + self.camera_x) // TILE_SIZE)
+        grid_y = int((mouse_pos[1] + self.camera_y) // TILE_SIZE)
+        
+        if 0 <= grid_x < self.level.width and 0 <= grid_y < self.level.height:
+            if mouse_click:
+                self._paint(grid_x, grid_y, self.selected_tool)
+            elif right_click:
+                self._paint(grid_x, grid_y, CellType.FLOOR) # Eraser
 
-        if is_erase:
-            cell.cell_type = CellType.WALL
-            # Remove objects
-            self._remove_objects_at(x, y)
-            return
-
-        # Place based on tool
-        if self.current_tool == EditorTool.WALL:
-            cell.cell_type = CellType.WALL
-            self._remove_objects_at(x, y)
-            
-        elif self.current_tool == EditorTool.FLOOR:
-            cell.cell_type = CellType.FLOOR
-            self._remove_objects_at(x, y)
-            
-        elif self.current_tool == EditorTool.SPAWN:
-            cell.cell_type = CellType.SPAWN
-            self.level.spawn_point = (x, y)
-            self.level.generator.spawn_point = (x, y)
-            
-        elif self.current_tool == EditorTool.EXIT:
-            cell.cell_type = CellType.EXIT
-            self.level.exit_point = (x, y)
-            self.level.generator.exit_point = (x, y)
-            
-        elif self.current_tool == EditorTool.KEY:
-            cell.cell_type = CellType.KEY
-            if (x, y) not in self.level.key_positions:
+    def _paint(self, x, y, cell_type):
+        # Update cell data
+        if (x, y) not in self.level.cells:
+             self.level.cells[(x, y)] = Cell(x, y, cell_type)
+        else:
+             self.level.cells[(x, y)].cell_type = cell_type
+             
+    def save_level(self):
+        # Scan cells to update lists (key_positions, etc) for the Level class
+        # (The Level.save_to_file usually relies on these lists being correct)
+        
+        self.level.key_positions = []
+        self.level.door_positions = []
+        self.level.trap_positions = []
+        self.level.enemy_spawns = []
+        
+        for (x, y), cell in self.level.cells.items():
+            ct = cell.cell_type
+            if ct == CellType.KEY:
                 self.level.key_positions.append((x, y))
-                
-        elif self.current_tool == EditorTool.DOOR:
-            cell.cell_type = CellType.DOOR
-            cell.is_locked = True
-            if (x, y) not in self.level.door_positions:
+            elif ct == CellType.DOOR:
                 self.level.door_positions.append((x, y))
-                
-        elif self.current_tool == EditorTool.TRAP:
-            cell.cell_type = CellType.TRAP
-            if (x, y) not in self.level.trap_positions:
+            elif ct == CellType.TRAP:
                 self.level.trap_positions.append((x, y))
-                
-        elif self.current_tool == EditorTool.ENEMY_PATROL:
-            cell.cell_type = CellType.FLOOR
-            # Add enemy spawn
-            if (x, y) not in self.level.enemy_spawns:
+            elif ct == CellType.ENEMY_SPAWN:
                 self.level.enemy_spawns.append((x, y))
-
-    def _remove_objects_at(self, x, y):
-        """Clear dynamic objects from cell."""
-        pos = (x, y)
-        if pos in self.level.key_positions: self.level.key_positions.remove(pos)
-        if pos in self.level.door_positions: self.level.door_positions.remove(pos)
-        if pos in self.level.trap_positions: self.level.trap_positions.remove(pos)
-        if pos in self.level.enemy_spawns: self.level.enemy_spawns.remove(pos)
+            elif ct == CellType.SPAWN:
+                self.level.spawn_point = (x, y)
+            elif ct == CellType.EXIT:
+                self.level.exit_point = (x, y)
         
-    def render(self):
-        """Render editor state."""
-        # Draw game world (reuse renderer)
+        # Save
+        filename = "levels/level_1.json" # Default for now
+        self.level.save_to_file(filename)
         if self.game.renderer:
-            # Force update visible tiles to see updates immediately
-            if self.level:
-                self.game.renderer.level = self.level
-            self.game.renderer.render(self.game.screen)
+            self.game.renderer.add_notification(f"Saved to {filename}!", COLORS.EXIT)
+        if self.game.audio_manager:
+            self.game.audio_manager.play_sound("sfx_ui_select", 1.0)
+             
+    def render(self):
+        self.game.screen.fill(COLORS.VOID)
         
-        # UI Overlay
-        overlay = pygame.Surface((SCREEN_WIDTH, 40))
-        overlay.fill((0, 0, 0))
-        overlay.set_alpha(200)
-        self.game.screen.blit(overlay, (0, SCREEN_HEIGHT - 40))
+        # Draw visible grid
+        start_x = int(self.camera_x // TILE_SIZE)
+        start_y = int(self.camera_y // TILE_SIZE)
+        end_x = start_x + (SCREEN_WIDTH // TILE_SIZE) + 1
+        end_y = start_y + (SCREEN_HEIGHT // TILE_SIZE) + 1
         
-        # Tool Text
-        text = f"Tool: {self.current_tool.name} | [1-8] Tools | [Left] Place | [Right] Erase | [S]ave | [P]lay"
-        surf = self.font_tiny.render(text, True, COLORS.UI_TEXT)
-        self.game.screen.blit(surf, (10, SCREEN_HEIGHT - 30))
+        # Offset for smooth scrolling
+        off_x = -int(self.camera_x % TILE_SIZE)
+        off_y = -int(self.camera_y % TILE_SIZE)
+        
+        for y in range(start_y, end_y):
+            for x in range(start_x, end_x):
+                # Calculate screen pos
+                sx = (x - start_x) * TILE_SIZE + off_x
+                sy = (y - start_y) * TILE_SIZE + off_y
+                
+                # Check valid
+                if 0 <= x < self.level.width and 0 <= y < self.level.height:
+                    # Draw base grid
+                    pygame.draw.rect(self.game.screen, (20, 20, 20), (sx, sy, TILE_SIZE, TILE_SIZE), 1)
+                    
+                    # Draw Content
+                    cell = self.level.get_cell(x, y)
+                    if cell:
+                        self._draw_cell(sx, sy, cell.cell_type)
+    
+        # Side Panel
+        panel_rect = pygame.Rect(SCREEN_WIDTH - 200, 0, 200, SCREEN_HEIGHT)
+        pygame.draw.rect(self.game.screen, COLORS.UI_BG, panel_rect)
+        pygame.draw.line(self.game.screen, COLORS.UI_BORDER, (SCREEN_WIDTH - 200, 0), (SCREEN_WIDTH - 200, SCREEN_HEIGHT), 2)
+        
+        # Title
+        title = self.game.font_medium.render("EDITOR", True, COLORS.UI_TEXT)
+        self.game.screen.blit(title, (SCREEN_WIDTH - 150, 10))
+        
+        # Selected Tool
+        try:
+            # Find name again
+            t_name = next(name for name, t in self.tools if t == self.selected_tool)
+        except:
+            t_name = "UNKNOWN"
+            
+        sel_text = self.game.font_small.render(f"Tool: {t_name}", True, COLORS.PLAYER)
+        self.game.screen.blit(sel_text, (SCREEN_WIDTH - 180, 550))
+        
+        for btn in self.ui_buttons:
+            # Highlight selected tool button
+            is_active = False
+            for name, t in self.tools:
+                if btn.text == name and t == self.selected_tool:
+                    is_active = True
+                    break
+            
+            if is_active:
+                pygame.draw.rect(self.game.screen, COLORS.PLAYER_DASH, btn.rect.inflate(4, 4), 2, border_radius=6)
+            btn.draw(self.game.screen)
+            
+    def _draw_cell(self, x, y, ctype):
+        color = COLORS.FLOOR
+        if ctype == CellType.WALL: color = COLORS.WALL
+        elif ctype == CellType.KEY: color = COLORS.KEY
+        elif ctype == CellType.DOOR: color = COLORS.DOOR_LOCKED
+        elif ctype == CellType.EXIT: color = COLORS.EXIT
+        elif ctype == CellType.SPAWN: color = COLORS.SPAWN
+        elif ctype == CellType.TRAP: color = COLORS.TRAP
+        elif ctype == CellType.ENEMY_SPAWN: color = COLORS.ENEMY_PATROL
+        elif ctype == CellType.HIDING_SPOT: color = COLORS.HIDING_SPOT
+        
+        pygame.draw.rect(self.game.screen, color, (x + 2, y + 2, TILE_SIZE - 4, TILE_SIZE - 4))
