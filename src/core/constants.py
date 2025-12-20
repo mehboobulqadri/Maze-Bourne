@@ -10,8 +10,17 @@ from typing import Tuple
 # =============================================================================
 # DISPLAY SETTINGS
 # =============================================================================
-SCREEN_WIDTH = 1280
-SCREEN_HEIGHT = 720
+# Native Resolution - Game runs at 1280x720
+WINDOW_WIDTH = 1280
+WINDOW_HEIGHT = 720
+
+# Internal Game Resolution (same as window now)
+GAME_WIDTH = 1280
+GAME_HEIGHT = 720
+
+# Logic uses Game Resolution
+SCREEN_WIDTH = GAME_WIDTH
+SCREEN_HEIGHT = GAME_HEIGHT
 TARGET_FPS = 144
 WINDOW_TITLE = "Maze Bourne"
 
@@ -216,6 +225,7 @@ CORRIDOR_WIDTH = 2
 # =============================================================================
 class GameState(Enum):
     MENU = auto()
+    LEVEL_SELECT = auto()
     PLAYING = auto()
     PAUSED = auto()
     GAME_OVER = auto()
@@ -225,6 +235,7 @@ class GameState(Enum):
     SETTINGS = auto()
     HELP = auto()
     CREDITS = auto()
+    ACHIEVEMENTS = auto()
 
 # =============================================================================
 # INPUT MAPPINGS (can be customized later)

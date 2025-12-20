@@ -1,0 +1,63 @@
+{
+  "unlocked": [
+    "untouchable",
+    "iron_will",
+    "speed_demon_1",
+    "ghost",
+    "first_escape"
+  ],
+  "achievements": {
+    "first_escape": {
+      "unlocked": true,
+      "unlock_time": 1766049052.4013453
+    },
+    "halfway_there": {
+      "unlocked": false,
+      "unlock_time": 0.0
+    },
+    "master_escapist": {
+      "unlocked": false,
+      "unlock_time": 0.0
+    },
+    "speed_demon_1": {
+      "unlocked": true,
+      "unlock_time": 1766049052.4013453
+    },
+    "speed_demon_5": {
+      "unlocked": false,
+      "unlock_time": 0.0
+    },
+    "ultimate_speedrunner": {
+      "unlocked": false,
+      "unlock_time": 0.0
+    },
+    "ghost": {
+      "unlocked": true,
+      "unlock_time": 1766049052.4013453
+    },
+    "phantom": {
+      "unlocked": false,
+      "unlock_time": 0.0
+    },
+    "untouchable": {
+      "unlocked": true,
+      "unlock_time": 1766049052.4013453
+    },
+    "iron_will": {
+      "unlocked": true,
+      "unlock_time": 1766215264.2549024
+    },
+    "persistent": {
+      "unlocked": false,
+      "unlock_time": 0.0
+    },
+    "three_star_master": {
+      "unlocked": false,
+      "unlock_time": 0.0
+    },
+    "flawless_victory": {
+      "unlocked": false,
+      "unlock_time": 0.0
+    }
+  }
+}

@@ -18,14 +18,16 @@ class Player:
     Player character with movement, stealth, and dash abilities.
     """
     
-    def __init__(self, x: float = 1, y: float = 1):
+    def __init__(self, x: float = 1, y: float = 1, max_health: int = None):
         # Position (in grid units)
         self.x = float(x)
         self.y = float(y)
         
         # Stats
-        self.health = PLAYER_HEALTH
-        self.max_health = PLAYER_HEALTH
+        if max_health is None:
+            max_health = PLAYER_HEALTH
+        self.max_health = max_health
+        self.health = max_health
         self.energy = PLAYER_MAX_ENERGY
         self.max_energy = PLAYER_MAX_ENERGY
         
@@ -48,6 +50,9 @@ class Player:
         
         # Inventory
         self.keys = 0
+        
+        # Notification debounce
+        self.last_notification_time = 0.0
         
         # Movement input buffer
         self._move_input = (0, 0)
@@ -99,6 +104,10 @@ class Player:
         # Update invulnerability
         if self.invulnerable_timer > 0:
             self.invulnerable_timer -= dt
+        
+        # Update notification debounce timer
+        if self.last_notification_time > 0:
+            self.last_notification_time -= dt
         
         # Check for interactions
         self._check_interactions(game)
@@ -244,6 +253,15 @@ class Player:
         if self._move_input == (0, 0):
             return  # Need to be moving to dash
         
+        # Check if dash path is immediately blocked (Don't waste energy on walls)
+        dx, dy = self._move_input
+        check_dist = 0.5 # Check half a tile ahead
+        if not self._check_collision(self.x + dx * check_dist, self.y + dy * check_dist, game.level):
+            # Blocked
+            if hasattr(game, 'audio_manager'):
+                game.audio_manager.play_sound("sfx_ui_hover") 
+            return
+
         self.is_dashing = True
         self.dash_timer = DASH_DURATION
         self.dash_direction = self._move_input
@@ -253,36 +271,6 @@ class Player:
         # Play sound
         if hasattr(game, 'audio_manager'):
             game.audio_manager.play_sound("sfx_dash")
-    
-    def _update_dash(self, dt: float, level):
-        """Update dash movement with collision check."""
-        if not self.is_dashing:
-            return
-        
-        self.dash_timer -= dt
-        if self.dash_timer <= 0:
-            self.is_dashing = False
-            return
-        
-        # Move in dash direction but check collision
-        dash_speed = DASH_DISTANCE / DASH_DURATION
-        dx = self.dash_direction[0] * dash_speed * dt
-        dy = self.dash_direction[1] * dash_speed * dt
-        
-        # Continuous collision detection (steps)
-        steps = 5
-        for i in range(steps):
-             step_x = dx / steps
-             step_y = dy / steps
-             
-             if self._check_collision(self.x + step_x, self.y + step_y, level):
-                 self.x += step_x
-                 self.y += step_y
-             else:
-                 # Hit wall, stop dash
-                 self.is_dashing = False
-                 self.dash_timer = 0
-                 break
     
     def _check_interactions(self, game):
         """Check for and handle interactions with objects."""
@@ -312,16 +300,37 @@ class Player:
             from src.core.constants import GameState
             
             if self.keys > 0:
+                # Record level completion
+                if hasattr(game, 'stats_tracker'):
+                    level_num = getattr(game, 'current_level_num', 1)
+                    stars, is_new_best_time, is_new_best_stars = game.stats_tracker.complete_level(level_num)
+                    
+                    # Check for new achievements
+                    if hasattr(game, 'achievement_manager'):
+                        stats_dict = game.stats_tracker.get_stats_dict()
+                        new_achievements = game.achievement_manager.check_all(stats_dict)
+                        game._new_achievements = new_achievements
+                        
+                        if new_achievements:
+                            game.achievement_manager.save()
+                    
+                    # Store stats for victory screen
+                    import time
+                    completion_time = time.time() - game.stats_tracker.current_level_start_time
+                    game._victory_stats = (stars, completion_time, is_new_best_time)
+                
                 if game.renderer:
                     game.renderer.add_notification("Level Complete!", COLORS.EXIT)
                 if hasattr(game, 'audio_manager'):
                     game.audio_manager.play_sound("sfx_ui_select", 1.5)
                 game.change_state(GameState.VICTORY)
             else:
-                if game.renderer:
-                    game.renderer.add_notification("Locked! Find the Key", COLORS.UI_TEXT_DIM)
-                if hasattr(game, 'audio_manager'):
-                    game.audio_manager.play_sound("sfx_ui_hover", 1.0)
+                if self.last_notification_time <= 0:
+                    if game.renderer:
+                        game.renderer.add_notification("Locked! Find the Key", COLORS.UI_TEXT_DIM)
+                    if hasattr(game, 'audio_manager'):
+                        game.audio_manager.play_sound("sfx_ui_hover", 1.0)
+                    self.last_notification_time = 2.0  # Debounce for 2 seconds
         
         # Check for trap damage
         if cell.cell_type == CellType.TRAP:
@@ -333,7 +342,11 @@ class Player:
             return
             
         self.health -= amount
-        self.invulnerable_timer = 2.0  # 2 seconds i-frames
+        self.invulnerable_timer = 0.5  # Reduced i-frames
+        
+        # Record damage in stats
+        if hasattr(game, 'stats_tracker'):
+            game.stats_tracker.record_damage()
         
         if game.renderer:
             from src.core.constants import COLORS
@@ -344,13 +357,22 @@ class Player:
             game.audio_manager.play_sound("sfx_alert", 1.0)
             
         if self.health <= 0:
+            # Record death
+            if hasattr(game, 'stats_tracker'):
+                game.stats_tracker.record_death()
+            
             from src.core.constants import GameState
             game.change_state(GameState.GAME_OVER)
     
     def interact(self, game):
-        """Interact with nearby objects (doors, levers)."""
+        """Interact with nearby objects (doors, levers, hiding spots)."""
         if not game.level:
             return
+        
+        # First check for game object interactions
+        if hasattr(game, 'game_object_manager') and game.game_object_manager:
+            if game.game_object_manager.handle_interact(self, game):
+                return
         
         # Check adjacent cells
         cx, cy = int(self.x + 0.3), int(self.y + 0.3)

@@ -183,11 +183,11 @@ class Level:
         if cell is None:
             return False
         
-        # Check if door has been opened
+        # Check if it's a door
         if cell.cell_type == CellType.DOOR:
-            if (x, y) in self.opened_doors:
-                return True
-            return not cell.is_locked
+            # Door is only walkable if it has been explicitly opened
+            # (added to opened_doors set via interaction)
+            return (x, y) in self.opened_doors
         
         return cell.is_walkable()
     

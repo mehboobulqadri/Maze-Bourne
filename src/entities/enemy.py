@@ -14,20 +14,7 @@ from src.core.constants import (
     EnemyType, EnemyState, ENEMY_CONFIG, TILE_SIZE,
     ENEMY_PATROL_WAIT, ENEMY_ALERT_DURATION, ENEMY_SEARCH_DURATION, ENEMY_CHASE_TIMEOUT
 )
-
-
-@dataclass
-class GridPos:
-    """Simple grid position."""
-    x: float
-    y: float
-    
-    def distance_to(self, other: 'GridPos') -> float:
-        """Calculate distance to another position."""
-        return math.sqrt((self.x - other.x) ** 2 + (self.y - other.y) ** 2)
-    
-    def to_tuple(self) -> Tuple[int, int]:
-        return (int(self.x), int(self.y))
+from src.utils.grid import GridPos
 
 
 class Enemy:
@@ -84,6 +71,12 @@ class Enemy:
         self.is_alive = True
         self.health = 1
         
+        # Pathfinding
+        self.pathfinder = None
+        self.current_path: List[GridPos] = []
+        self.path_update_timer = 0.0
+        self.path_update_interval = 0.5
+        
         # Generate initial patrol route
         self._generate_patrol_route()
     
@@ -138,9 +131,17 @@ class Enemy:
         # Generate patrol route if needed
         if not getattr(self, '_patrol_generated', False):
             self._generate_valid_patrol(level)
+        
+        # Initialize pathfinder if needed
+        if self.pathfinder is None and level:
+            from src.ai.pathfinding import AStarPathfinder
+            self.pathfinder = AStarPathfinder(level.cells)
             
         # Store game reference for later use
         self._game = game
+        
+        # Update path timer
+        self.path_update_timer += dt
         
         # Get dynamic settings
         speed_mult = 1.0
@@ -243,8 +244,49 @@ class Enemy:
         
         return False
     
+    def _move_along_path(self, level) -> bool:
+        """Move along precalculated A* path. Returns True if moved."""
+        if not self._can_move() or not self.current_path:
+            return False
+        
+        # Find next waypoint in path
+        current_grid_pos = GridPos(int(self.pos.x), int(self.pos.y))
+        
+        # Check if we've reached current target
+        if self.current_path and current_grid_pos == self.current_path[0]:
+            self.current_path.pop(0)
+        
+        if not self.current_path:
+            return False
+        
+        # Move toward next point in path
+        next_pos = self.current_path[0]
+        return self._move_toward(next_pos, level)
+    
+    def _update_pathfinding(self, target: GridPos, use_pathfinding: bool = True):
+        """Update A* path to target if needed."""
+        if not use_pathfinding or not self.pathfinder:
+            self.current_path = []
+            return
+        
+        # Check if we need to recalculate
+        if self.path_update_timer < self.path_update_interval:
+            return
+        
+        self.path_update_timer = 0.0
+        
+        # Calculate new path
+        start = GridPos(int(self.pos.x), int(self.pos.y))
+        goal = GridPos(int(target.x), int(target.y))
+        
+        self.current_path = self.pathfinder.find_path(start, goal, max_distance=30)
+    
     def _can_see_player(self, player, level) -> bool:
         """Check if enemy can see the player."""
+        # Hidden players are invisible
+        if getattr(player, 'is_hidden', False):
+            return False
+        
         player_pos = GridPos(player.x, player.y)
         distance = self.pos.distance_to(player_pos)
         
@@ -419,7 +461,18 @@ class Enemy:
         # Move toward last known position
         if self.last_known_player_pos:
             if self.pos.distance_to(self.last_known_player_pos) > 0.5:
-                self._move_toward(self.last_known_player_pos, level)
+                # Use pathfinding for search if smart enough
+                smartness = getattr(self, 'current_smartness', 1.0)
+                use_pathfinding = (self.enemy_type == EnemyType.TRACKER or smartness >= 1.5)
+                
+                if use_pathfinding and self.pathfinder:
+                    self._update_pathfinding(self.last_known_player_pos, use_pathfinding=True)
+                    if self.current_path:
+                        self._move_along_path(level)
+                    else:
+                        self._move_toward(self.last_known_player_pos, level)
+                else:
+                    self._move_toward(self.last_known_player_pos, level)
             else:
                 # At location, search around
                 if self.state_timer > self.state_duration:
@@ -443,7 +496,19 @@ class Enemy:
         
         # Chase toward player
         target = GridPos(player.x, player.y)
-        self._move_toward(target, level)
+        
+        # Use A* pathfinding for TRACKER and smart enemies
+        smartness = getattr(self, 'current_smartness', 1.0)
+        use_pathfinding = (self.enemy_type == EnemyType.TRACKER or smartness >= 1.5)
+        
+        if use_pathfinding and self.pathfinder:
+            self._update_pathfinding(target, use_pathfinding=True)
+            if self.current_path:
+                self._move_along_path(level)
+            else:
+                self._move_toward(target, level)
+        else:
+            self._move_toward(target, level)
         
         # Check for catch
         if self.pos.distance_to(target) < 0.6:

@@ -77,15 +77,25 @@ class Door(GameObject):
         if player.keys >= self.required_keys:
             player.keys -= self.required_keys
             self.is_locked = False
+            
+            # Update level collision
+            if game and game.level:
+                game.level.opened_doors.add((int(self.x), int(self.y)))
+                
             print(f"[Door] Unlocked door: {self.door_id}")
             return True
         else:
             print(f"[Door] Need {self.required_keys} key(s) to open!")
             return False
     
-    def unlock(self):
+    def unlock(self, game=None):
         """Unlock the door (from lever or other source)."""
         self.is_locked = False
+        
+        # Update level collision
+        if game and game.level:
+            game.level.opened_doors.add((int(self.x), int(self.y)))
+            
         print(f"[Door] Door {self.door_id} unlocked remotely")
 
 
@@ -112,9 +122,12 @@ class Lever(GameObject):
                 if hasattr(obj, 'door_id') and obj.door_id == obj_id:
                     if isinstance(obj, Door):
                         if self.is_on:
-                            obj.unlock()
+                            obj.unlock(game)
                         else:
                             obj.is_locked = True
+                            # Remove from opened_doors if relocking
+                            if game and game.level and (int(obj.x), int(obj.y)) in game.level.opened_doors:
+                                game.level.opened_doors.remove((int(obj.x), int(obj.y)))
                 elif hasattr(obj, 'camera_id') and obj.camera_id == obj_id:
                     if isinstance(obj, SecurityCamera):
                         obj.is_disabled = self.is_on

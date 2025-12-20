@@ -11,6 +11,7 @@ from typing import Optional, Callable, Dict, Any
 from enum import Enum
 
 from src.core.constants import (
+    WINDOW_WIDTH, WINDOW_HEIGHT, GAME_WIDTH, GAME_HEIGHT,
     SCREEN_WIDTH, SCREEN_HEIGHT, TARGET_FPS, WINDOW_TITLE,
     GameState, COLORS, DEBUG_MODE, SHOW_FPS
 )
@@ -39,6 +40,16 @@ class Game:
         self.audio_manager.set_master_volume(self.settings_manager.get("audio", "master_volume"))
         self.audio_manager.set_sfx_volume(self.settings_manager.get("audio", "sfx_volume"))
         
+        # Procedural Music
+        from src.core.music_generator import ProceduralMusicGenerator
+        self.music_generator = ProceduralMusicGenerator()
+        
+        # Stats and Achievements
+        from src.core.stats_tracker import StatsTracker
+        from src.core.achievements import AchievementManager
+        self.stats_tracker = StatsTracker()
+        self.achievement_manager = AchievementManager()
+        
         # Settings UI State
         self.settings_index = 0
         self.settings_options = [
@@ -51,7 +62,7 @@ class Game:
         
         # Display setup
         self.screen = pygame.display.set_mode(
-            (SCREEN_WIDTH, SCREEN_HEIGHT),
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
             pygame.DOUBLEBUF | pygame.HWSURFACE
         )
         pygame.display.set_caption(WINDOW_TITLE)
@@ -77,7 +88,7 @@ class Game:
         self.level = None
         self.player = None
         self.enemies = []
-        self.game_objects = []
+        self.game_object_manager = None
         
         # Input state
         self.keys_pressed = set()
@@ -94,11 +105,11 @@ class Game:
         self.debug_mode = DEBUG_MODE
         self.show_fps = SHOW_FPS
         
-        # Fonts
-        self.font_large = pygame.font.Font(None, 72)
-        self.font_medium = pygame.font.Font(None, 48)
-        self.font_small = pygame.font.Font(None, 32)
-        self.font_tiny = pygame.font.Font(None, 24)
+        # Fonts (optimized for 720p)
+        self.font_large = pygame.font.Font(None, 80)
+        self.font_medium = pygame.font.Font(None, 52)
+        self.font_small = pygame.font.Font(None, 36)
+        self.font_tiny = pygame.font.Font(None, 28)
         
         # Editor (needs fonts)
         self.editor = Editor(self)
@@ -111,6 +122,76 @@ class Game:
             handler = self.state_handlers[self.state]
             if "enter" in handler and handler["enter"]:
                 handler["enter"]()
+
+    def run(self):
+        """Main game loop."""
+        while self.running:
+            # delta time
+            self.dt = self.clock.tick(self.target_fps) / 1000.0
+            
+            # FPS tracking
+            self.frame_count += 1
+            self.fps_update_timer += self.dt
+            if self.fps_update_timer >= 1.0:
+                self.fps = self.frame_count / self.fps_update_timer
+                self.frame_count = 0
+                self.fps_update_timer = 0.0
+                if self.show_fps:
+                    pygame.display.set_caption(f"{WINDOW_TITLE} | FPS: {self.fps:.1f}")
+            
+            # Event handling
+            self.keys_just_pressed.clear()
+            self.keys_just_released.clear()
+            
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                elif event.type == pygame.KEYDOWN:
+                    self.keys_pressed.add(event.key)
+                    self.keys_just_pressed.add(event.key)
+                    
+                    # Global debug toggle
+                    if event.key == pygame.K_F1:
+                        self.debug_mode = not self.debug_mode
+                        
+                elif event.type == pygame.KEYUP:
+                    self.keys_pressed.discard(event.key)
+                    self.keys_just_released.add(event.key)
+                
+                # Mouse Input
+                elif event.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
+                    mx, my = event.pos
+                    
+                    # Clamp to game bounds
+                    mx = max(0, min(GAME_WIDTH - 1, mx))
+                    my = max(0, min(GAME_HEIGHT - 1, my))
+                    
+                    self.mouse_pos = (mx, my)
+                    
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        if event.button <= 3: 
+                            self.mouse_buttons[event.button - 1] = True
+                    elif event.type == pygame.MOUSEBUTTONUP:
+                        if event.button <= 3:
+                            self.mouse_buttons[event.button - 1] = False
+            
+            # Update
+            if self.state in self.state_handlers:
+                self.state_handlers[self.state]["update"](self.dt)
+            
+            # Render Phase
+            # Clear screen
+            self.screen.fill(COLORS.BACKGROUND)
+            
+            # Call State Render
+            if self.state in self.state_handlers:
+                handler = self.state_handlers[self.state]["render"]
+                handler()
+
+            # Flip
+            pygame.display.flip()
+            
+        self._cleanup()
     
     def _setup_default_handlers(self):
         """Set up default state handlers."""
@@ -153,6 +234,13 @@ class Game:
             render=self._help_render,
             enter=self._help_enter
         )
+        
+        # Level Select state
+        self.register_state_handler(GameState.LEVEL_SELECT,
+            update=self._level_select_update,
+            render=self._level_select_render,
+            enter=self._level_select_enter
+        )
 
         # Credits state
         self.register_state_handler(GameState.CREDITS,
@@ -173,6 +261,13 @@ class Game:
             update=self._settings_update,
             render=self._settings_render,
             enter=self._settings_enter
+        )
+        
+        # Achievements state
+        self.register_state_handler(GameState.ACHIEVEMENTS,
+            update=self._achievements_update,
+            render=self._achievements_render,
+            enter=self._achievements_enter
         )
     
     def register_state_handler(self, state: GameState, 
@@ -203,51 +298,6 @@ class Game:
         # Enter new state
         if self.state in self.state_handlers:
             self.state_handlers[self.state]["enter"]()
-    
-    def run(self):
-        """Main game loop - runs at up to 144hz."""
-        last_time = time.perf_counter()
-        
-        while self.running:
-            # Calculate delta time
-            current_time = time.perf_counter()
-            self.dt = current_time - last_time
-            last_time = current_time
-            
-            # Cap delta time to prevent physics explosions
-            self.dt = min(self.dt, 0.1)
-            
-            # Process events
-            self._process_events()
-            
-            # Update current state
-            if self.state in self.state_handlers:
-                self.state_handlers[self.state]["update"](self.dt)
-            
-            # Render current state
-            # CLEAR SCREEN logic moved inside render for custom backgrounds
-            if self.state in self.state_handlers:
-                self.state_handlers[self.state]["render"]()
-            
-            # Render debug info
-            if self.show_fps:
-                self._render_fps()
-            
-            # Flip display
-            pygame.display.flip()
-            
-            # Frame rate management
-            self.clock.tick(self.target_fps)
-            
-            # Update FPS counter
-            self.frame_count += 1
-            self.fps_update_timer += self.dt
-            if self.fps_update_timer >= 0.5:
-                self.fps = self.frame_count / self.fps_update_timer
-                self.frame_count = 0
-                self.fps_update_timer = 0.0
-        
-        self._cleanup()
     
     def _process_events(self):
         """Process pygame events."""
@@ -296,6 +346,7 @@ class Game:
         """Check if a key was just released this frame."""
         return key in self.keys_just_released
     
+
     def _render_fps(self):
         """Render FPS counter."""
         fps_text = f"FPS: {self.fps:.1f}"
@@ -313,9 +364,7 @@ class Game:
     
     def _menu_action(self, action):
         if action == "play":
-            self.current_level_num = 1
-            self.reset_level_requested = True
-            self.change_state(GameState.PLAYING)
+            self.change_state(GameState.LEVEL_SELECT)
         elif action == "settings":
             self.change_state(GameState.SETTINGS)
         elif action == "editor":
@@ -324,6 +373,8 @@ class Game:
              self.change_state(GameState.HELP)
         elif action == "credits":
              self.change_state(GameState.CREDITS)
+        elif action == "achievements":
+             self.change_state(GameState.ACHIEVEMENTS)
         elif action == "quit":
             self.running = False
 
@@ -339,6 +390,7 @@ class Game:
         try:
             self.level = Level.from_campaign(1)
             self.renderer.setup_for_level(self.level)
+            self.renderer.menu_mode = True  # Show full map in menu
             self.player = None 
         except Exception:
             self.level = None
@@ -346,21 +398,23 @@ class Game:
         # UI Setup
         cx = SCREEN_WIDTH // 2
         cy = SCREEN_HEIGHT // 2
-        btn_w, btn_h = 200, 45
-        gap = 55
+        btn_w, btn_h = 240, 50
+        gap = 60
         
         self.menu_buttons = [
             Button(cx - btn_w//2, cy - 20, btn_w, btn_h, "PLAY", self.font_medium, 
                    action=lambda: self._menu_action("play")),
             Button(cx - btn_w//2, cy - 20 + gap, btn_w, btn_h, "SETTINGS", self.font_medium, 
                    action=lambda: self._menu_action("settings")),
-            Button(cx - btn_w//2, cy - 20 + gap*2, btn_w, btn_h, "EDITOR", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*2, btn_w, btn_h, "ACHIEVEMENTS", self.font_medium, 
+                   action=lambda: self._menu_action("achievements")),
+            Button(cx - btn_w//2, cy - 20 + gap*3, btn_w, btn_h, "EDITOR", self.font_medium, 
                    action=lambda: self._menu_action("editor")),
-            Button(cx - btn_w//2, cy - 20 + gap*3, btn_w, btn_h, "HELP", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*4, btn_w, btn_h, "HELP", self.font_medium, 
                    action=lambda: self._menu_action("help")),
-            Button(cx - btn_w//2, cy - 20 + gap*4, btn_w, btn_h, "CREDITS", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*5, btn_w, btn_h, "CREDITS", self.font_medium, 
                    action=lambda: self._menu_action("credits")),
-            Button(cx - btn_w//2, cy - 20 + gap*5, btn_w, btn_h, "QUIT", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*6, btn_w, btn_h, "QUIT", self.font_medium, 
                    action=lambda: self._menu_action("quit")),
         ]
 
@@ -369,7 +423,7 @@ class Game:
     def _help_enter(self):
         cx = SCREEN_WIDTH // 2
         self.help_buttons = [
-             Button(cx - 100, SCREEN_HEIGHT - 80, 200, 50, "BACK", self.font_medium, 
+             Button(cx - 120, SCREEN_HEIGHT - 90, 240, 55, "BACK", self.font_medium, 
                    action=lambda: self.change_state(GameState.MENU))
         ]
 
@@ -380,110 +434,6 @@ class Game:
              btn.update(mouse_pos, mouse_click, self.audio_manager)
         if self.is_key_just_pressed(pygame.K_ESCAPE):
              self.change_state(GameState.MENU)
-
-    def _help_render(self):
-        self.screen.fill(COLORS.BACKGROUND)
-        
-        title = self.font_large.render("HOW TO PLAY", True, COLORS.PLAYER)
-        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 50)))
-        
-        # Mechanics
-        info = [
-            ("Objective", "Find the Key (Gold) -> Escape (Green Portal)"),
-            ("Movement", "WASD to Move. Shift to Sneak (Silent). Space to Dash."),
-            ("Enemies", "Red Drones (Patrol), Orange Bots (Tracking), Yellow (Sound)."),
-            ("Survival", "Avoid Vision Cones. Use Hiding Spots (Blue Boxes)."),
-            ("Energy", "Dashing/Sneaking uses Energy. Stay still to Regen."),
-        ]
-        
-        y = 120
-        for head, body in info:
-            h_surf = self.font_medium.render(head, True, COLORS.UI_ENERGY)
-            self.screen.blit(h_surf, (100, y))
-            b_surf = self.font_small.render(body, True, COLORS.UI_TEXT)
-            self.screen.blit(b_surf, (100, y + 35))
-            y += 80
-            
-        # Draw some example entities
-        # Key
-        pygame.draw.circle(self.screen, COLORS.KEY, (SCREEN_WIDTH - 200, 150), 15)
-        k_txt = self.font_tiny.render("Key", True, COLORS.UI_TEXT_DIM)
-        self.screen.blit(k_txt, (SCREEN_WIDTH - 200 - 10, 180))
-        
-        # Enemy
-        pygame.draw.rect(self.screen, COLORS.ENEMY_PATROL, (SCREEN_WIDTH - 220, 250, 40, 40), border_radius=5)
-        e_txt = self.font_tiny.render("Patrol", True, COLORS.UI_TEXT_DIM)
-        self.screen.blit(e_txt, (SCREEN_WIDTH - 220, 300))
-        
-        for btn in self.help_buttons:
-            btn.draw(self.screen)
-
-    def _credits_enter(self):
-        cx = SCREEN_WIDTH // 2
-        self.credits_buttons = [
-             Button(cx - 100, SCREEN_HEIGHT - 80, 200, 50, "BACK", self.font_medium, 
-                   action=lambda: self.change_state(GameState.MENU))
-        ]
-        self.credits_offset = 0.0
-
-    def _credits_update(self, dt: float):
-        self.credits_offset += 30 * dt
-        mouse_pos = pygame.mouse.get_pos()
-        mouse_click = pygame.mouse.get_pressed()[0]
-        for btn in self.credits_buttons:
-             btn.update(mouse_pos, mouse_click, self.audio_manager)
-        if self.is_key_just_pressed(pygame.K_ESCAPE):
-             self.change_state(GameState.MENU)
-
-    def _credits_render(self):
-        self.screen.fill(COLORS.VOID)
-        
-        # Rolling credits
-        lines = [
-            "MAZE BOURNE",
-            "",
-            "Created by",
-            "Antigravity Agent",
-            "",
-            "Tools Used",
-            "Pygame Community Edition",
-            "Python 3",
-            "",
-            "Special Thanks",
-            "Google DeepMind",
-            "The User",
-            "",
-            "Assets",
-            "Procedural Audio Generator",
-            "Geometric Graphics Engine",
-            "",
-            "Thank you for playing!"
-        ]
-        
-        cx = SCREEN_WIDTH // 2
-        start_y = SCREEN_HEIGHT - 100 - self.credits_offset
-        
-        for line in lines:
-            if start_y > SCREEN_HEIGHT:
-                 start_y += 40
-                 continue
-            if start_y < -50:
-                 pass # optimized out
-            
-            color = COLORS.PLAYER if line == "MAZE BOURNE" else COLORS.UI_TEXT
-            font = self.font_large if line == "MAZE BOURNE" else self.font_medium
-            
-            surf = font.render(line, True, color)
-            self.screen.blit(surf, surf.get_rect(center=(cx, start_y)))
-            start_y += 50
-            
-        # Restart text if scrolled far
-        if start_y < -500:
-             self.credits_offset = -SCREEN_HEIGHT
-        
-        for btn in self.credits_buttons:
-            btn.draw(self.screen)
-
     def _menu_update(self, dt: float):
         """Update menu state."""
         # Pan Camera
@@ -491,6 +441,7 @@ class Game:
             self.renderer.camera.x += 20 * dt
             self.renderer.update(dt) # Update particles/effects
             
+        # Get mouse position in window coordinates and convert to game surface coordinates
         mouse_pos = pygame.mouse.get_pos()
         mouse_click = pygame.mouse.get_pressed()[0]
         
@@ -549,7 +500,7 @@ class Game:
                    action=lambda: self._toggle_difficulty()))
                    
         # Back Button
-        self.settings_ui_elements.append(Button(cx - 100, 550, 200, 50, "BACK", self.font_medium, 
+        self.settings_ui_elements.append(Button(cx - 120, 560, 240, 55, "BACK", self.font_medium, 
                    action=lambda: self.change_state(GameState.MENU)))
 
     def _toggle_difficulty(self):
@@ -604,6 +555,221 @@ class Game:
         for el in self.settings_ui_elements:
             el.draw(self.screen)
     
+    # =========================================================================
+    # Achievements State
+    # =========================================================================
+    
+    def _achievements_enter(self):
+        """Setup achievements screen UI."""
+        cx = SCREEN_WIDTH // 2
+        self.achievements_buttons = [
+            Button(cx - 120, SCREEN_HEIGHT - 90, 240, 55, "BACK", self.font_medium, 
+                   action=lambda: self.change_state(GameState.MENU))
+        ]
+        self.achievements_scroll = 0.0
+    
+    def _achievements_update(self, dt: float):
+        """Update achievements screen."""
+        mouse_pos = pygame.mouse.get_pos()
+        mouse_click = pygame.mouse.get_pressed()[0]
+        
+        for btn in self.achievements_buttons:
+            btn.update(mouse_pos, mouse_click, self.audio_manager)
+        
+        if self.is_key_just_pressed(pygame.K_ESCAPE):
+            self.change_state(GameState.MENU)
+    
+    def _achievements_render(self):
+        """Render achievements screen."""
+        self.screen.fill(COLORS.BACKGROUND)
+        
+        # Title
+        title = self.font_large.render("ACHIEVEMENTS", True, COLORS.PLAYER)
+        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 60)))
+        
+        # Get achievements data
+        if hasattr(self, 'achievement_manager'):
+            achievements = self.achievement_manager.get_all_visible()
+            progress = self.achievement_manager.get_progress()
+        else:
+            achievements = []
+            progress = (0, 0)
+        
+        # Progress bar
+        prog_text = self.font_small.render(f"Unlocked: {progress[0]} / {progress[1]}", 
+                                           True, COLORS.UI_TEXT_DIM)
+        self.screen.blit(prog_text, prog_text.get_rect(center=(SCREEN_WIDTH // 2, 100)))
+        
+        # Achievement grid (2 columns)
+        start_y = 140
+        col_width = SCREEN_WIDTH // 2 - 40
+        row_height = 80
+        
+        for i, ach in enumerate(achievements[:8]):  # Show max 8
+            col = i % 2
+            row = i // 2
+            
+            x = 40 + col * (col_width + 20)
+            y = start_y + row * row_height
+            
+            # Achievement box
+            box_rect = pygame.Rect(x, y, col_width, row_height - 10)
+            bg_color = (40, 50, 60) if ach.unlocked else (25, 30, 35)
+            pygame.draw.rect(self.screen, bg_color, box_rect, border_radius=8)
+            
+            # Border with achievement color if unlocked
+            border_color = ach.icon_color if ach.unlocked else COLORS.UI_BORDER
+            pygame.draw.rect(self.screen, border_color, box_rect, 2, border_radius=8)
+            
+            # Icon circle
+            icon_x = x + 35
+            icon_y = y + 35
+            if ach.unlocked:
+                pygame.draw.circle(self.screen, ach.icon_color, (icon_x, icon_y), 20)
+                # Checkmark
+                pygame.draw.line(self.screen, (30, 30, 30), (icon_x - 8, icon_y), (icon_x - 2, icon_y + 8), 3)
+                pygame.draw.line(self.screen, (30, 30, 30), (icon_x - 2, icon_y + 8), (icon_x + 10, icon_y - 6), 3)
+            else:
+                pygame.draw.circle(self.screen, COLORS.UI_TEXT_DIM, (icon_x, icon_y), 20, 2)
+                pygame.draw.line(self.screen, COLORS.UI_TEXT_DIM, (icon_x - 8, icon_y), (icon_x + 8, icon_y), 2)
+            
+            # Title
+            title_color = COLORS.UI_TEXT if ach.unlocked else COLORS.UI_TEXT_DIM
+            name_surf = self.font_small.render(ach.name, True, title_color)
+            self.screen.blit(name_surf, (x + 65, y + 12))
+            
+            # Description
+            desc_color = COLORS.UI_TEXT_DIM if ach.unlocked else (80, 80, 80)
+            desc_surf = self.font_tiny.render(ach.description, True, desc_color)
+            self.screen.blit(desc_surf, (x + 65, y + 38))
+        
+        # Back button
+        for btn in self.achievements_buttons:
+            btn.draw(self.screen)
+    
+    # =========================================================================
+    # Level Select State
+    # =========================================================================
+    
+    def _level_select_enter(self):
+        """Setup level selection UI with 10 levels."""
+        self.level_select_buttons = []
+        
+        # Grid layout: 5 columns x 2 rows
+        cols = 5
+        rows = 2
+        btn_w = 140
+        btn_h = 100
+        gap_x = 20
+        gap_y = 30
+        
+        total_width = cols * btn_w + (cols - 1) * gap_x
+        total_height = rows * btn_h + (rows - 1) * gap_y
+        start_x = (SCREEN_WIDTH - total_width) // 2
+        start_y = 150
+        
+        for i in range(10):
+            level_num = i + 1
+            row = i // cols
+            col = i % cols
+            
+            x = start_x + col * (btn_w + gap_x)
+            y = start_y + row * (btn_h + gap_y)
+            
+            # Get best stars for this level
+            best_stars = 0
+            if hasattr(self, 'stats_tracker'):
+                best_stars = self.stats_tracker.get_best_stars(level_num)
+            
+            btn = Button(x, y, btn_w, btn_h, f"Level {level_num}", self.font_medium,
+                        action=lambda lv=level_num: self._start_level(lv))
+            btn.stars = best_stars
+            btn.level_num = level_num
+            self.level_select_buttons.append(btn)
+        
+        # Back button
+        cx = SCREEN_WIDTH // 2
+        self.level_select_back_btn = Button(cx - 120, SCREEN_HEIGHT - 90, 240, 55, 
+                                            "BACK", self.font_medium,
+                                            action=lambda: self.change_state(GameState.MENU))
+    
+    def _start_level(self, level_num):
+        """Start a specific level."""
+        self.current_level_num = level_num
+        self.reset_level_requested = True
+        self.change_state(GameState.PLAYING)
+    
+    def _level_select_update(self, dt: float):
+        """Handle level selection input."""
+        mouse_pos = pygame.mouse.get_pos()
+        mouse_click = pygame.mouse.get_pressed()[0]
+        
+        for btn in self.level_select_buttons:
+            btn.update(mouse_pos, mouse_click, self.audio_manager)
+        
+        self.level_select_back_btn.update(mouse_pos, mouse_click, self.audio_manager)
+        
+        if self.is_key_just_pressed(pygame.K_ESCAPE):
+            self.change_state(GameState.MENU)
+    
+    def _level_select_render(self):
+        """Render level selection grid."""
+        self.screen.fill(COLORS.BACKGROUND)
+        
+        # Title
+        title = self.font_large.render("SELECT LEVEL", True, COLORS.PLAYER)
+        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 70)))
+        
+        # Draw level buttons with stars
+        for btn in self.level_select_buttons:
+            btn.draw(self.screen)
+            
+            # Draw stars below button text
+            stars = getattr(btn, 'stars', 0)
+            star_y = btn.rect.bottom - 25
+            star_spacing = 25
+            star_start_x = btn.rect.centerx - star_spacing
+            
+            for i in range(3):
+                star_x = star_start_x + i * star_spacing
+                self._draw_level_star(self.screen, star_x, star_y, 10, filled=(i < stars))
+        
+        # Draw back button
+        self.level_select_back_btn.draw(self.screen)
+        
+        # Difficulty reminder
+        diff = "Normal"
+        if hasattr(self, 'settings_manager'):
+            diff = self.settings_manager.get("gameplay", "difficulty") or "normal"
+            diff = diff.capitalize()
+        
+        diff_lives = {"Easy": 3, "Normal": 2, "Hard": 1}
+        lives = diff_lives.get(diff, 2)
+        
+        hint = self.font_tiny.render(f"Difficulty: {diff} ({lives} {'lives' if lives > 1 else 'life'})", 
+                                     True, COLORS.UI_TEXT_DIM)
+        self.screen.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 140)))
+    
+    def _draw_level_star(self, surface, x, y, size, filled=True):
+        """Draw a small star for level select."""
+        import math
+        points = []
+        for i in range(5):
+            angle = math.pi / 2 + i * 2 * math.pi / 5
+            outer_x = x + size * math.cos(angle)
+            outer_y = y - size * math.sin(angle)
+            points.append((outer_x, outer_y))
+            
+            angle += math.pi / 5
+            inner_x = x + size * 0.4 * math.cos(angle)
+            inner_y = y - size * 0.4 * math.sin(angle)
+            points.append((inner_x, inner_y))
+        
+        if filled:
+            pygame.draw.polygon(surface, COLORS.KEY, points)
+        else:
+            pygame.draw.polygon(surface, COLORS.UI_TEXT_DIM, points, 2)
+    
     def _playing_enter(self):
         """Called when entering the playing state - initialize game objects."""
         # Only re-initialize if level is missing or reset requested
@@ -621,19 +787,29 @@ class Game:
         from src.entities.player import Player
         from src.graphics.renderer import Renderer
         from src.entities.enemy import Enemy
+        from src.entities.game_objects import (
+            GameObjectManager, SecurityCamera, Trap, HidingSpot
+        )
         
         # Create campaign level
         print(f"[Maze Bourne] Loading Campaign Level {self.current_level_num}...")
         self.level = Level.from_campaign(self.current_level_num)
         
-        # Create player at spawn point
+        # Create player at spawn point with difficulty-based health
         spawn_x, spawn_y = self.level.spawn_point
-        self.player = Player(spawn_x, spawn_y)
+        difficulty = self.settings_manager.get("gameplay", "difficulty")
+        
+        # Difficulty determines max health: easy=3, medium=2, hard=1
+        health_by_difficulty = {"easy": 3, "normal": 2, "hard": 1}
+        max_health = health_by_difficulty.get(difficulty, 2)
+        
+        self.player = Player(spawn_x, spawn_y, max_health=max_health)
         
         # Initialize renderer if needed
         if not self.renderer:
             self.renderer = Renderer(self)
         self.renderer.setup_for_level(self.level)
+        self.renderer.menu_mode = False  # Disable menu mode for gameplay FOV
         self.renderer.add_notification(f"Level {self.current_level_num}", duration=3.0)
         
         # Spawn enemies from level config
@@ -642,9 +818,53 @@ class Game:
             enemy = Enemy(config["x"], config["y"], config["type"])
             self.enemies.append(enemy)
         
+        # Initialize game objects manager and spawn objects
+        self.game_object_manager = GameObjectManager()
+        
+        # Spawn cameras
+        for i, pos in enumerate(self.level.camera_positions):
+            camera = SecurityCamera(
+                x=pos[0], y=pos[1],
+                camera_id=f"cam_{i}",
+                vision_range=6.0,
+                vision_angle=90.0,
+                facing_direction=(1, 0),
+                rotation_pattern=[(1, 0), (0, 1), (-1, 0), (0, -1)],
+                rotation_wait=2.0
+            )
+            self.game_object_manager.add(camera)
+        
+        # Spawn traps
+        for i, pos in enumerate(self.level.trap_positions):
+            trap = Trap(
+                x=pos[0], y=pos[1],
+                trap_id=f"trap_{i}",
+                damage=1,
+                is_hidden=False
+            )
+            self.game_object_manager.add(trap)
+        
+        # Spawn hiding spots
+        for i, pos in enumerate(self.level.hiding_spot_positions):
+            hiding_spot = HidingSpot(
+                x=pos[0], y=pos[1],
+                spot_id=f"hide_{i}",
+                capacity=1
+            )
+            self.game_object_manager.add(hiding_spot)
+        
         print(f"[Maze Bourne] Level initialized: {self.level.width}x{self.level.height}")
         print(f"[Maze Bourne] Player spawned at: ({spawn_x}, {spawn_y})")
         print(f"[Maze Bourne] Spawned {len(self.enemies)} enemies")
+        print(f"[Maze Bourne] Spawned {len(self.game_object_manager.objects)} game objects")
+        
+        # Start level timer
+        self.stats_tracker.start_level(self.current_level_num)
+        
+        # Start ambient music
+        if hasattr(self, 'music_generator') and not self.music_generator.is_playing:
+            music_volume = self.settings_manager.get("audio", "music_volume") or 0.3
+            self.music_generator.play(volume=music_volume)
     
     def _playing_update(self, dt: float):
         """Update playing state."""
@@ -658,12 +878,21 @@ class Game:
                 if self.player:
                     self.player.interact(self)
         
+        # Update stats tracker
+        if self.player:
+            self.stats_tracker.update(dt, getattr(self.player, 'is_stealthed', False))
+        
         # Update game systems
         if self.player:
             self.player.update(dt, self)
         
         for enemy in self.enemies:
             enemy.update(dt, self)
+        
+        # Update game objects
+        if self.game_object_manager:
+            self.game_object_manager.update(dt, self)
+            self.game_object_manager.check_player_collision(self.player, self)
         
         if self.renderer:
             self.renderer.update(dt)
@@ -710,7 +939,7 @@ class Game:
         
         ctrl_text = self.font_medium.render("CONTROLS", True, COLORS.UI_ENERGY)
         self.screen.blit(ctrl_text, (250, start_y + 10))
-        ctrl_desc = self.font_small.render("Move. SHIFT to Sneak (Silent). SPACE to Dash.", True, COLORS.UI_TEXT)
+        ctrl_desc = self.font_small.render("Move. SHIFT: Sneak (Silent, uses Energy). SPACE: Dash (Burst, uses Energy).", True, COLORS.UI_TEXT)
         self.screen.blit(ctrl_desc, (250, start_y + 40))
         
         # 3. Enemies
@@ -720,7 +949,8 @@ class Game:
         pygame.draw.rect(self.screen, COLORS.ENEMY_PATROL, (60, start_y, 30, 30))
         pygame.draw.line(self.screen, (255, 0, 0), (75, start_y+15), (75+30, start_y+15), 2) # Vision ray
         
-        # Guard (Orange)
+        # Guard (Purple/Orange check)
+        # Replacing circle with Purple Guard
         pygame.draw.circle(self.screen, COLORS.ENEMY_GUARD, (130, start_y + 15), 15)
         
         # Hunter (Yellow)
@@ -729,7 +959,7 @@ class Game:
         
         en_text = self.font_medium.render("AVOID ENEMIES", True, COLORS.UI_ENERGY)
         self.screen.blit(en_text, (250, start_y))
-        en_desc = self.font_small.render("Red: Patrols | Orange: Guards | Yellow: Hears Noise", True, COLORS.UI_TEXT)
+        en_desc = self.font_small.render("Red: Patrol | Orange: Tracker | Yellow: Hunter | Purple: Guard", True, COLORS.UI_TEXT)
         self.screen.blit(en_desc, (250, start_y + 30))
         
         # 4. Hiding
@@ -762,7 +992,7 @@ class Game:
     def _credits_enter(self):
         cx = SCREEN_WIDTH // 2
         self.credits_buttons = [
-             Button(cx - 100, SCREEN_HEIGHT - 80, 200, 50, "BACK", self.font_medium, 
+             Button(cx - 120, SCREEN_HEIGHT - 90, 240, 55, "BACK", self.font_medium, 
                    action=lambda: self.change_state(GameState.MENU))
         ]
         self.credits_offset = 0.0
@@ -814,12 +1044,27 @@ class Game:
         # But we should recreate them to ensure correct state/position
         cx = SCREEN_WIDTH // 2
         cy = SCREEN_HEIGHT // 2
+        btn_w, btn_h = 240, 50
+        gap = 65
+        start_y = cy - gap
+        
         self.pause_buttons = [
-            Button(cx - 100, cy - 60, 200, 50, "RESUME", self.font_medium,
+            Button(cx - btn_w//2, start_y, btn_w, btn_h, "RESUME", self.font_medium,
                    action=lambda: self.change_state(GameState.PLAYING)),
-            Button(cx - 100, cy + 20, 200, 50, "MENU", self.font_medium,
+            
+            Button(cx - btn_w//2, start_y + gap, btn_w, btn_h, "RESTART LEVEL", self.font_medium,
+                   action=lambda: self._restart_level()),
+                   
+            Button(cx - btn_w//2, start_y + gap*2, btn_w, btn_h, "SETTINGS", self.font_medium,
+                   action=lambda: self.change_state(GameState.SETTINGS)),
+                   
+            Button(cx - btn_w//2, start_y + gap*3, btn_w, btn_h, "MENU", self.font_medium,
                    action=lambda: self.change_state(GameState.MENU)),
         ]
+        
+    def _restart_level(self):
+        self.reset_level_requested = True
+        self.change_state(GameState.PLAYING)
 
     def _paused_update(self, dt: float):
         mouse_pos = pygame.mouse.get_pos()
@@ -876,16 +1121,105 @@ class Game:
             self.current_level_num += 1
             self.reset_level_requested = True
             self.change_state(GameState.PLAYING)
+        elif self.is_key_just_pressed(pygame.K_ESCAPE):
+            # Back to menu
+            self.change_state(GameState.MENU)
     
     def _victory_render(self):
-        """Render victory state."""
-        text = self.font_large.render("LEVEL COMPLETE!", True, COLORS.EXIT)
-        rect = text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 50))
-        self.screen.blit(text, rect)
+        """Render victory state with stats."""
+        # Background
+        self.screen.fill(COLORS.BACKGROUND)
         
-        continue_text = self.font_small.render("Press ENTER to Continue", True, COLORS.UI_TEXT_DIM)
-        continue_rect = continue_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 50))
+        cx = SCREEN_WIDTH // 2
+        cy = SCREEN_HEIGHT // 2
+        
+        # Title
+        title = self.font_large.render("LEVEL COMPLETE!", True, COLORS.EXIT)
+        title_rect = title.get_rect(center=(cx, cy - 180))
+        self.screen.blit(title, title_rect)
+        
+        # Get completion stats
+        if hasattr(self, '_victory_stats'):
+            stars, completion_time, is_new_best = self._victory_stats
+        else:
+            # Fallback
+            stars = 1
+            completion_time = 0.0
+            is_new_best = False
+        
+        # Draw stars
+        star_y = cy - 120
+        star_spacing = 60
+        star_start_x = cx - star_spacing
+        
+        for i in range(3):
+            star_x = star_start_x + i * star_spacing
+            self._draw_star(self.screen, star_x, star_y, 25, filled=(i < stars))
+        
+        # Time display
+        time_text = self._format_time(completion_time)
+        time_surf = self.font_medium.render(f"Time: {time_text}", True, COLORS.UI_TEXT)
+        time_rect = time_surf.get_rect(center=(cx, cy - 40))
+        self.screen.blit(time_surf, time_rect)
+        
+        # New best time indicator
+        if is_new_best:
+            best_surf = self.font_small.render("NEW BEST TIME!", True, COLORS.KEY)
+            best_rect = best_surf.get_rect(center=(cx, cy))
+            self.screen.blit(best_surf, best_rect)
+        
+        # Star thresholds
+        thresholds = self.stats_tracker.get_star_thresholds(self.current_level_num - 1)
+        threshold_y = cy + 40
+        threshold_surf = self.font_tiny.render(
+            f"Star Times: {self._format_time(thresholds[0])} | {self._format_time(thresholds[1])} | {self._format_time(thresholds[2])}", 
+            True, COLORS.UI_TEXT_DIM
+        )
+        threshold_rect = threshold_surf.get_rect(center=(cx, threshold_y))
+        self.screen.blit(threshold_surf, threshold_rect)
+        
+        # Newly unlocked achievements
+        if hasattr(self, '_new_achievements') and self._new_achievements:
+            ach_y = cy + 80
+            ach_title = self.font_small.render("ACHIEVEMENTS UNLOCKED!", True, COLORS.KEY)
+            ach_title_rect = ach_title.get_rect(center=(cx, ach_y))
+            self.screen.blit(ach_title, ach_title_rect)
+            
+            for i, achievement in enumerate(self._new_achievements[:3]):
+                ach_surf = self.font_tiny.render(f"• {achievement.name}", True, achievement.icon_color)
+                ach_rect = ach_surf.get_rect(center=(cx, ach_y + 30 + i * 25))
+                self.screen.blit(ach_surf, ach_rect)
+        
+        # Continue prompt
+        continue_text = self.font_small.render("ENTER: Next Level  |  ESC: Menu", True, COLORS.UI_TEXT_DIM)
+        continue_rect = continue_text.get_rect(center=(cx, SCREEN_HEIGHT - 60))
         self.screen.blit(continue_text, continue_rect)
+    
+    def _draw_star(self, surface, x, y, size, filled=True):
+        """Draw a star shape."""
+        import math
+        points = []
+        for i in range(5):
+            angle = math.pi / 2 + i * 2 * math.pi / 5
+            outer_x = x + size * math.cos(angle)
+            outer_y = y - size * math.sin(angle)
+            points.append((outer_x, outer_y))
+            
+            angle += math.pi / 5
+            inner_x = x + size * 0.4 * math.cos(angle)
+            inner_y = y - size * 0.4 * math.sin(angle)
+            points.append((inner_x, inner_y))
+        
+        if filled:
+            pygame.draw.polygon(surface, COLORS.KEY, points)
+        else:
+            pygame.draw.polygon(surface, COLORS.UI_TEXT_DIM, points, 2)
+    
+    def _format_time(self, seconds):
+        """Format seconds as MM:SS.mmm"""
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes:02d}:{secs:06.3f}"
     
     def _cleanup(self):
         """Clean up resources."""

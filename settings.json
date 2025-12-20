@@ -6,7 +6,7 @@
         "enabled": true
     },
     "gameplay": {
-        "difficulty": "easy",
+        "difficulty": "hard",
         "enemy_speed_multiplier": 1.0,
         "enemy_vision_multiplier": 1.0,
         "enemy_smartness": 1.0

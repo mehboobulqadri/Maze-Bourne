@@ -173,6 +173,13 @@ class Renderer:
         # Pre-create surfaces for effects
         self.glow_surface = pygame.Surface((TILE_SIZE * 2, TILE_SIZE * 2), pygame.SRCALPHA)
     
+        # Visibility
+        self.visible_tiles = set()
+        self.explored_tiles = set()
+        
+        # Menu mode: show full map without FOV restrictions
+        self.menu_mode = False
+    
     def add_notification(self, text: str, color: Tuple = COLORS.UI_TEXT, duration: float = 2.0):
         """Add a floating notification."""
         self.notifications.append([text, duration, color])
@@ -193,6 +200,9 @@ class Renderer:
             player_x = self.game.player.x * TILE_SIZE + TILE_SIZE // 2
             player_y = self.game.player.y * TILE_SIZE + TILE_SIZE // 2
             self.camera.set_target(player_x, player_y)
+            
+            # Calculate FOV
+            self._update_fov(self.game.player.x, self.game.player.y)
         
         self.camera.update(dt)
         self.particles.update(dt)
@@ -207,11 +217,96 @@ class Renderer:
             px = self.game.player.x * TILE_SIZE + TILE_SIZE // 2
             py = self.game.player.y * TILE_SIZE + TILE_SIZE // 2
             self.particles.spawn(px, py, COLORS.PLAYER_DASH, count=3, speed=30, lifetime=0.3)
-    
-    def render(self, screen: pygame.Surface):
-        # Clear with gradient background
-        self._draw_background(screen)
+
+    def _update_fov(self, px: float, py: float):
+        """Simple Raycast FOV."""
+        self.visible_tiles.clear()
         
+        radius = 12
+        radius_sq = radius * radius
+        
+        # Optimization: Only check bounding box
+        min_x = int(px - radius)
+        max_x = int(px + radius)
+        min_y = int(py - radius)
+        max_y = int(py + radius)
+        
+        # Add center
+        self.visible_tiles.add((int(px), int(py)))
+        
+        # Steps for raycasting
+        steps = 20 # checks per unit distance
+        
+        level = self.game.level
+        if not level: return
+
+        # Iterate through border of the box and cast rays to it? 
+        # Better: iterate all tiles in box, if close enough, check line of sight
+        # Even Better for performance: Shadowcasting, but let's do simple ray check for now
+        
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                dx = x - px
+                dy = y - py
+                dist_sq = dx*dx + dy*dy
+                
+                if dist_sq > radius_sq:
+                    continue
+                
+                # Check Line of Sight
+                if self._has_line_of_sight(px, py, x + 0.5, y + 0.5, level):
+                    self.visible_tiles.add((x, y))
+                    self.explored_tiles.add((x, y))
+    
+    def _has_line_of_sight(self, x0, y0, x1, y1, level):
+        """Bresenham-like line check."""
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        x = int(x0)
+        y = int(y0)
+        n = 1 + int(dx + dy)
+        x_inc = 1 if x1 > x0 else -1
+        y_inc = 1 if y1 > y0 else -1
+        error = dx - dy
+        dx *= 2
+        dy *= 2
+        
+        # Note: This is a discrete approximation. For precise wall corners, 
+        # meaningful raycasting is needed. But for grid, stepping tiles is okay.
+        # Actually proper DDA is better.
+        
+        # Let's use simple sampling
+        dist = math.hypot(x1 - x0, y1 - y0)
+        if dist == 0: return True
+        
+        step_size = 0.5 # Check every half tile
+        steps = int(dist / step_size) + 1
+        
+        cur_x = x0
+        cur_y = y0
+        vx = (x1 - x0) / dist * step_size
+        vy = (y1 - y0) / dist * step_size
+        
+        for _ in range(steps):
+             tx, ty = int(cur_x), int(cur_y)
+             # If strictly wall and not start/end?
+             # Player can see wall itself, but not behind it
+             if (tx, ty) != (int(x0), int(y0)) and (tx, ty) != (int(x1), int(y1)):
+                 cell = level.get_cell(tx, ty)
+                 if cell and cell.cell_type == CellType.WALL:
+                     return False
+             
+             cur_x += vx
+             cur_y += vy
+             
+        # Check endpoint (wall is visible)
+        return True
+
+    def render(self, screen: pygame.Surface):
+        # Clear with black (Fog)
+        screen.fill(COLORS.VOID)
+        
+        # Only render visible stuff
         # Draw level
         self._render_floor(screen)
         self._render_walls(screen)
@@ -220,8 +315,14 @@ class Renderer:
         # Draw enemies with glow
         self._render_enemies(screen)
         
+        # Draw game objects (cameras, traps, hiding spots)
+        self._render_game_objects(screen)
+        
         # Draw player with effects
         self._render_player(screen)
+        
+        # Draw Fog Overlay (Soft edges?)
+        # For now, tiles outside 'visible_tiles' are just not drawn (Black)
         
         # Draw particles
         self.particles.draw(screen, self.camera)
@@ -237,6 +338,223 @@ class Renderer:
         if self.game.debug_mode:
             self._render_debug(screen)
 
+    # MODIFIED RENDER METHODS TO CHECK VISIBILITY
+    
+    def _render_floor(self, screen: pygame.Surface):
+        level = self.game.level
+        if not level:
+            return
+        
+        # Calculate visible tile range
+        start_x = max(0, int(self.camera.x // TILE_SIZE) - 1)
+        start_y = max(0, int(self.camera.y // TILE_SIZE) - 1)
+        end_x = min(level.width, int((self.camera.x + SCREEN_WIDTH) // TILE_SIZE) + 2)
+        end_y = min(level.height, int((self.camera.y + SCREEN_HEIGHT) // TILE_SIZE) + 2)
+        
+        for y in range(start_y, end_y):
+            for x in range(start_x, end_x):
+                # Visibility Check (bypass in menu mode)
+                if not self.menu_mode and (x, y) not in self.visible_tiles:
+                    continue
+                
+                cell = level.get_cell(x, y)
+                if cell is None or cell.cell_type == CellType.WALL:
+                    continue
+                    continue
+                
+                world_x = x * TILE_SIZE
+                world_y = y * TILE_SIZE
+                screen_x, screen_y = self.camera.world_to_screen(world_x, world_y)
+                
+                # Draw floor
+                self._draw_floor_tile(screen, screen_x, screen_y, x, y)
+
+    def _draw_floor_tile(self, surface: pygame.Surface, x: int, y: int, 
+                         grid_x: int, grid_y: int, brightness_mult: float = 1.0):
+        """Draw stylized floor tile."""
+        # Base color with slight variation
+        tile_bright = 1.0 + math.sin((grid_x + grid_y) * 0.5) * 0.05
+        
+        # Apply FOV brightness
+        final_bright = tile_bright * brightness_mult
+        
+        base_color = tuple(int(c * final_bright) for c in COLORS.FLOOR)
+        pattern_color = tuple(int(c * brightness_mult) for c in COLORS.FLOOR_PATTERN)
+        
+        pygame.draw.rect(surface, base_color, (x, y, TILE_SIZE, TILE_SIZE))
+        
+        # Subtle grid lines
+        pygame.draw.rect(surface, pattern_color, (x, y, TILE_SIZE, TILE_SIZE), 1)
+        
+        # Detail only if bright enough
+        if brightness_mult > 0.5:
+            if (grid_x + grid_y) % 5 == 0:
+                hl_color = tuple(int(c * brightness_mult) for c in COLORS.WALL_HIGHLIGHT)
+                pygame.draw.rect(surface, hl_color, (x + 4, y + 4, 6, 6), 1)
+
+    def _render_walls(self, screen: pygame.Surface):
+        level = self.game.level
+        if not level:
+            return
+        
+        start_x = max(0, int(self.camera.x // TILE_SIZE) - 1)
+        start_y = max(0, int(self.camera.y // TILE_SIZE) - 1)
+        end_x = min(level.width, int((self.camera.x + SCREEN_WIDTH) // TILE_SIZE) + 2)
+        end_y = min(level.height, int((self.camera.y + SCREEN_HEIGHT) // TILE_SIZE) + 2)
+        
+        for y in range(start_y, end_y):
+            for x in range(start_x, end_x):
+                # Visibility Check (bypass in menu mode)
+                if not self.menu_mode and (x, y) not in self.visible_tiles:
+                    continue
+
+                cell = level.get_cell(x, y)
+                if cell is None or cell.cell_type != CellType.WALL:
+                    continue
+                
+                world_x = x * TILE_SIZE
+                world_y = y * TILE_SIZE
+                screen_x, screen_y = self.camera.world_to_screen(world_x, world_y)
+                
+                self._draw_wall(screen, screen_x, screen_y, x, y)
+
+    def _draw_wall(self, surface: pygame.Surface, x: int, y: int,
+                   grid_x: int, grid_y: int, brightness: float = 1.0):
+        """Draw stylized 3D wall."""
+        
+        def darken(color, factor):
+            return tuple(int(c * factor) for c in color)
+            
+        wall_color = darken(COLORS.WALL, brightness)
+        hl_color = darken(COLORS.WALL_HIGHLIGHT, brightness)
+        
+        # Main wall
+        pygame.draw.rect(surface, wall_color, (x, y, TILE_SIZE, TILE_SIZE))
+        
+        # Top highlight
+        pygame.draw.line(surface, hl_color, (x, y), (x + TILE_SIZE, y), 2)
+        
+        # Only draw details if visible
+        if brightness > 0.5:
+             pygame.draw.line(surface, hl_color, (x, y), (x, y + TILE_SIZE // 3), 2)
+             # Tech panel
+             if (grid_x + grid_y) % 3 == 0:
+                 p_color = darken(tuple(min(255, c + 15) for c in COLORS.WALL), brightness)
+                 pygame.draw.rect(surface, p_color, (x + 8, y + 8, TILE_SIZE - 16, TILE_SIZE - 16), 1)
+
+    def _render_objects(self, screen: pygame.Surface):
+        level = self.game.level
+        if not level: return
+        
+        # Same iteration...
+        start_x = max(0, int(self.camera.x // TILE_SIZE) - 1)
+        start_y = max(0, int(self.camera.y // TILE_SIZE) - 1)
+        end_x = min(level.width, int((self.camera.x + SCREEN_WIDTH) // TILE_SIZE) + 2)
+        end_y = min(level.height, int((self.camera.y + SCREEN_HEIGHT) // TILE_SIZE) + 2)
+        
+        for y in range(start_y, end_y):
+            for x in range(start_x, end_x):
+                # In menu mode, show all objects
+                if self.menu_mode:
+                    cell = level.get_cell(x, y)
+                    if not cell: continue
+                    world_x = x * TILE_SIZE
+                    world_y = y * TILE_SIZE
+                    screen_x, screen_y = self.camera.world_to_screen(world_x, world_y)
+                    self._draw_object_by_type(screen, screen_x, screen_y, cell)
+                    continue
+                    
+                # Objects only visible if in LOS? 
+                # Yes. Hidden behind walls.
+                if (x, y) not in self.visible_tiles:
+                     # Maybe show explored stationary objects (exits/doors) as dim?
+                     # Let's show Explored-but-not-visible as dim for static objects
+                     if (x, y) not in self.explored_tiles:
+                         continue
+                     # Only draw static objects dimly
+                     cell = level.get_cell(x, y)
+                     if not cell: continue
+                     # Key/Enemies should NOT be shown if not visible, even if explored?
+                     # Key is static until picked up.
+                     # Let's say only Doors/Exits/Traps/Spawns are static map features.
+                     if cell.cell_type in [CellType.KEY, CellType.ENEMY_SPAWN]:
+                         continue # Dynamic-ish (Keys disappear)
+                
+                cell = level.get_cell(x, y) # Re-get cell if it was skipped above
+                if cell is None: continue
+                
+                world_x = x * TILE_SIZE
+                world_y = y * TILE_SIZE
+                screen_x, screen_y = self.camera.world_to_screen(world_x, world_y)
+                
+                # Check dimming
+                is_dim = (x, y) not in self.visible_tiles
+                
+                if cell.cell_type == CellType.KEY and not is_dim:
+                    self._draw_key(screen, screen_x, screen_y)
+                elif cell.cell_type == CellType.DOOR:
+                    self._draw_door(screen, screen_x, screen_y, cell.is_locked)
+                elif cell.cell_type == CellType.EXIT:
+                    self._draw_exit(screen, screen_x, screen_y)
+                elif cell.cell_type == CellType.TRAP and not is_dim:
+                     self._draw_trap(screen, screen_x, screen_y)
+                elif cell.cell_type == CellType.HIDING_SPOT:
+                     self._draw_hiding_spot(screen, screen_x, screen_y)
+                elif cell.cell_type == CellType.CAMERA and not is_dim:
+                    self._draw_camera_obj(screen, screen_x, screen_y)
+                elif cell.cell_type == CellType.LEVER and not is_dim:
+                    self._draw_lever(screen, screen_x, screen_y, cell.is_active)
+    
+    def _draw_object_by_type(self, screen, screen_x, screen_y, cell):
+        """Draw a cell object by its type (for menu mode)."""
+        if cell.cell_type == CellType.KEY:
+            self._draw_key(screen, screen_x, screen_y)
+        elif cell.cell_type == CellType.DOOR:
+            self._draw_door(screen, screen_x, screen_y, cell.is_locked)
+        elif cell.cell_type == CellType.EXIT:
+            self._draw_exit(screen, screen_x, screen_y)
+        elif cell.cell_type == CellType.TRAP:
+            self._draw_trap(screen, screen_x, screen_y)
+        elif cell.cell_type == CellType.HIDING_SPOT:
+            self._draw_hiding_spot(screen, screen_x, screen_y)
+
+    def _render_enemies(self, screen: pygame.Surface):
+        for enemy in self.game.enemies:
+            # Only render if visible!
+            ex, ey = int(enemy.pos.x), int(enemy.pos.y)
+            if (ex, ey) in self.visible_tiles:
+                self._render_enemy(screen, enemy)
+    
+    def _render_game_objects(self, screen: pygame.Surface):
+        """Render all game objects (cameras, traps, hiding spots)."""
+        if not hasattr(self.game, 'game_object_manager') or not self.game.game_object_manager:
+            return
+        
+        from src.entities.game_objects import SecurityCamera, Trap, HidingSpot
+        
+        for obj in self.game.game_object_manager.objects:
+            if not obj.is_active:
+                continue
+            
+            # Only render if visible
+            if (obj.x, obj.y) not in self.visible_tiles:
+                continue
+            
+            world_x = obj.x * TILE_SIZE
+            world_y = obj.y * TILE_SIZE
+            screen_x, screen_y = self.camera.world_to_screen(world_x, world_y)
+            
+            if isinstance(obj, SecurityCamera):
+                self._draw_security_camera(screen, screen_x, screen_y, obj)
+            elif isinstance(obj, Trap):
+                self._draw_trap_object(screen, screen_x, screen_y, obj)
+            elif isinstance(obj, HidingSpot):
+                self._draw_hiding_spot_object(screen, screen_x, screen_y, obj)
+    
+    def _render_debug(self, screen: pygame.Surface):
+        # ... logic ...
+        pass
+    
     def _render_interaction_prompts(self, screen: pygame.Surface):
         """Draw 'E' prompt near interactable objects."""
         if not self.game.player or not self.game.level:
@@ -244,7 +562,38 @@ class Renderer:
             
         px, py = self.game.player.x, self.game.player.y
         
-        # Check adjacent cells
+        # Check for game object interactions
+        if hasattr(self.game, 'game_object_manager') and self.game.game_object_manager:
+            from src.entities.game_objects import HidingSpot, Lever
+            positions = [
+                (int(px), int(py)),
+                (int(px) + 1, int(py)),
+                (int(px) - 1, int(py)),
+                (int(px), int(py) + 1),
+                (int(px), int(py) - 1),
+            ]
+            
+            for pos in positions:
+                for obj in self.game.game_object_manager.get_at(*pos):
+                    if isinstance(obj, (HidingSpot, Lever)) and obj.is_active:
+                        world_x = obj.x * TILE_SIZE + TILE_SIZE // 2
+                        world_y = obj.y * TILE_SIZE - 10
+                        sx, sy = self.camera.world_to_screen(world_x, world_y)
+                        
+                        # Bobbing motion
+                        sy += math.sin(self.time * 5) * 3
+                        
+                        # Draw prompt
+                        prompt_text = self.game.font_small.render("[E]", True, COLORS.UI_TEXT)
+                        prompt_rect = prompt_text.get_rect(center=(sx, sy))
+                        
+                        # Background
+                        bg_rect = prompt_rect.inflate(8, 4)
+                        pygame.draw.rect(screen, (0, 0, 0, 200), bg_rect, border_radius=4)
+                        pygame.draw.rect(screen, COLORS.UI_BORDER, bg_rect, 1, border_radius=4)
+                        screen.blit(prompt_text, prompt_rect)
+        
+        # Check adjacent cells for doors/levers
         for dx, dy in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]:
             tx, ty = int(px + dx), int(py + dy)
             cell = self.game.level.get_cell(tx, ty)
@@ -302,134 +651,6 @@ class Renderer:
     def _draw_background(self, screen: pygame.Surface):
         """Draw gradient background."""
         screen.fill(COLORS.VOID)
-    
-    def _render_floor(self, screen: pygame.Surface):
-        level = self.game.level
-        if not level:
-            return
-        
-        # Calculate visible tile range
-        start_x = max(0, int(self.camera.x // TILE_SIZE) - 1)
-        start_y = max(0, int(self.camera.y // TILE_SIZE) - 1)
-        end_x = min(level.width, int((self.camera.x + SCREEN_WIDTH) // TILE_SIZE) + 2)
-        end_y = min(level.height, int((self.camera.y + SCREEN_HEIGHT) // TILE_SIZE) + 2)
-        
-        for y in range(start_y, end_y):
-            for x in range(start_x, end_x):
-                cell = level.get_cell(x, y)
-                if cell is None or cell.cell_type == CellType.WALL:
-                    continue
-                
-                world_x = x * TILE_SIZE
-                world_y = y * TILE_SIZE
-                screen_x, screen_y = self.camera.world_to_screen(world_x, world_y)
-                
-                # Draw floor with pattern
-                self._draw_floor_tile(screen, screen_x, screen_y, x, y)
-    
-    def _draw_floor_tile(self, surface: pygame.Surface, x: int, y: int, 
-                         grid_x: int, grid_y: int):
-        """Draw stylized floor tile."""
-        # Base color with slight variation
-        brightness = 1.0 + math.sin((grid_x + grid_y) * 0.5) * 0.05
-        base_color = tuple(int(c * brightness) for c in COLORS.FLOOR)
-        
-        pygame.draw.rect(surface, base_color, (x, y, TILE_SIZE, TILE_SIZE))
-        
-        # Subtle grid lines
-        pygame.draw.rect(surface, COLORS.FLOOR_PATTERN, (x, y, TILE_SIZE, TILE_SIZE), 1)
-        
-        # Tech panel detail on some tiles
-        if (grid_x + grid_y) % 5 == 0:
-            pygame.draw.rect(surface, COLORS.WALL_HIGHLIGHT, 
-                           (x + 4, y + 4, 6, 6), 1)
-        if (grid_x * 3 + grid_y * 2) % 7 == 0:
-            pygame.draw.line(surface, COLORS.FLOOR_PATTERN,
-                           (x + 8, y + TILE_SIZE // 2), 
-                           (x + TILE_SIZE - 8, y + TILE_SIZE // 2), 1)
-    
-    def _render_walls(self, screen: pygame.Surface):
-        level = self.game.level
-        if not level:
-            return
-        
-        start_x = max(0, int(self.camera.x // TILE_SIZE) - 1)
-        start_y = max(0, int(self.camera.y // TILE_SIZE) - 1)
-        end_x = min(level.width, int((self.camera.x + SCREEN_WIDTH) // TILE_SIZE) + 2)
-        end_y = min(level.height, int((self.camera.y + SCREEN_HEIGHT) // TILE_SIZE) + 2)
-        
-        for y in range(start_y, end_y):
-            for x in range(start_x, end_x):
-                cell = level.get_cell(x, y)
-                if cell is None or cell.cell_type != CellType.WALL:
-                    continue
-                
-                world_x = x * TILE_SIZE
-                world_y = y * TILE_SIZE
-                screen_x, screen_y = self.camera.world_to_screen(world_x, world_y)
-                
-                self._draw_wall(screen, screen_x, screen_y, x, y)
-    
-    def _draw_wall(self, surface: pygame.Surface, x: int, y: int,
-                   grid_x: int, grid_y: int):
-        """Draw stylized 3D wall."""
-        # Main wall
-        pygame.draw.rect(surface, COLORS.WALL, (x, y, TILE_SIZE, TILE_SIZE))
-        
-        # Top highlight
-        pygame.draw.line(surface, COLORS.WALL_HIGHLIGHT, 
-                        (x, y), (x + TILE_SIZE, y), 2)
-        pygame.draw.line(surface, COLORS.WALL_HIGHLIGHT, 
-                        (x, y), (x, y + TILE_SIZE // 3), 2)
-        
-        # Bottom shadow
-        shadow = tuple(max(0, c - 25) for c in COLORS.WALL)
-        pygame.draw.line(surface, shadow, 
-                        (x, y + TILE_SIZE - 1), (x + TILE_SIZE, y + TILE_SIZE - 1), 2)
-        pygame.draw.line(surface, shadow, 
-                        (x + TILE_SIZE - 1, y + TILE_SIZE // 2), 
-                        (x + TILE_SIZE - 1, y + TILE_SIZE), 2)
-        
-        # Tech panel details
-        if (grid_x + grid_y) % 3 == 0:
-            panel_color = tuple(min(255, c + 15) for c in COLORS.WALL)
-            pygame.draw.rect(surface, panel_color, 
-                           (x + 8, y + 8, TILE_SIZE - 16, TILE_SIZE - 16), 1)
-    
-    def _render_objects(self, screen: pygame.Surface):
-        level = self.game.level
-        if not level:
-            return
-        
-        start_x = max(0, int(self.camera.x // TILE_SIZE) - 1)
-        start_y = max(0, int(self.camera.y // TILE_SIZE) - 1)
-        end_x = min(level.width, int((self.camera.x + SCREEN_WIDTH) // TILE_SIZE) + 2)
-        end_y = min(level.height, int((self.camera.y + SCREEN_HEIGHT) // TILE_SIZE) + 2)
-        
-        for y in range(start_y, end_y):
-            for x in range(start_x, end_x):
-                cell = level.get_cell(x, y)
-                if cell is None:
-                    continue
-                
-                world_x = x * TILE_SIZE
-                world_y = y * TILE_SIZE
-                screen_x, screen_y = self.camera.world_to_screen(world_x, world_y)
-                
-                if cell.cell_type == CellType.KEY:
-                    self._draw_key(screen, screen_x, screen_y)
-                elif cell.cell_type == CellType.DOOR:
-                    self._draw_door(screen, screen_x, screen_y, cell.is_locked)
-                elif cell.cell_type == CellType.EXIT:
-                    self._draw_exit(screen, screen_x, screen_y)
-                elif cell.cell_type == CellType.SPAWN:
-                    self._draw_spawn(screen, screen_x, screen_y)
-                elif cell.cell_type == CellType.TRAP:
-                    self._draw_trap(screen, screen_x, screen_y)
-                elif cell.cell_type == CellType.HIDING_SPOT:
-                    self._draw_hiding_spot(screen, screen_x, screen_y)
-                elif cell.cell_type == CellType.CAMERA:
-                    self._draw_camera_obj(screen, screen_x, screen_y)
     
     def _draw_key(self, surface: pygame.Surface, x: int, y: int):
         """Draw animated key with glow."""
@@ -536,6 +757,10 @@ class Renderer:
     def _render_player(self, screen: pygame.Surface):
         player = self.game.player
         if not player:
+            return
+        
+        # Player is invisible when hiding
+        if getattr(player, 'is_hidden', False):
             return
         
         # Blink effect if invulnerable
@@ -758,6 +983,81 @@ class Renderer:
             # Blink
             if int(self.time * 4) % 2 == 0:
                 screen.blit(stealth_text, rect)
+        
+        # Speedrun Timer (Top Right)
+        if hasattr(self.game, 'stats_tracker'):
+            import time
+            elapsed = time.time() - self.game.stats_tracker.current_level_start_time
+            timer_text = self._format_speedrun_time(elapsed)
+            
+            # Determine color based on star projection
+            thresholds = self.game.stats_tracker.get_star_thresholds(self.game.current_level_num)
+            if elapsed <= thresholds[0]:
+                timer_color = (255, 215, 0)  # Gold - 3 stars
+            elif elapsed <= thresholds[1]:
+                timer_color = (192, 192, 192)  # Silver - 2 stars
+            elif elapsed <= thresholds[2]:
+                timer_color = (205, 127, 50)  # Bronze - 1 star
+            else:
+                timer_color = COLORS.UI_TEXT_DIM  # Gray - over time
+            
+            timer_surf = self.game.font_medium.render(timer_text, True, timer_color)
+            timer_rect = timer_surf.get_rect(topright=(SCREEN_WIDTH - 20, 20))
+            
+            # Background for timer
+            bg_rect = pygame.Rect(timer_rect.left - 10, timer_rect.top - 5, timer_rect.width + 20, timer_rect.height + 10)
+            bg_surf = pygame.Surface(bg_rect.size, pygame.SRCALPHA)
+            bg_surf.fill((10, 15, 25, 220))
+            screen.blit(bg_surf, bg_rect.topleft)
+            pygame.draw.rect(screen, timer_color, bg_rect, 2, border_radius=5)
+            
+            screen.blit(timer_surf, timer_rect)
+            
+            # Star projection below timer
+            stars = self._calculate_stars_for_time(elapsed, thresholds)
+            star_display_y = timer_rect.bottom + 15
+            star_size = 12
+            star_spacing = 28
+            star_start_x = SCREEN_WIDTH - 20 - star_spacing * 1.5
+            
+            for i in range(3):
+                star_x = star_start_x + i * star_spacing
+                self._draw_mini_star(screen, star_x, star_display_y, star_size, filled=(i < stars))
+    
+    def _format_speedrun_time(self, seconds):
+        """Format time for speedrun display."""
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes:02d}:{secs:06.3f}"
+    
+    def _calculate_stars_for_time(self, elapsed, thresholds):
+        """Calculate star rating for current time."""
+        if elapsed <= thresholds[0]:
+            return 3
+        elif elapsed <= thresholds[1]:
+            return 2
+        elif elapsed <= thresholds[2]:
+            return 1
+        return 0
+    
+    def _draw_mini_star(self, surface, x, y, size, filled=True):
+        """Draw a small star."""
+        points = []
+        for i in range(5):
+            angle = math.pi / 2 + i * 2 * math.pi / 5
+            outer_x = x + size * math.cos(angle)
+            outer_y = y - size * math.sin(angle)
+            points.append((outer_x, outer_y))
+            
+            angle += math.pi / 5
+            inner_x = x + size * 0.4 * math.cos(angle)
+            inner_y = y - size * 0.4 * math.sin(angle)
+            points.append((inner_x, inner_y))
+        
+        if filled:
+            pygame.draw.polygon(surface, COLORS.KEY, points)
+        else:
+            pygame.draw.polygon(surface, COLORS.UI_TEXT_DIM, points, 2)
     
     def _draw_heart(self, surface: pygame.Surface, x: int, y: int, color: Tuple):
         """Draw a heart shape."""
@@ -787,3 +1087,125 @@ class Renderer:
         text = self.game.font_tiny.render(
             f"Particles: {len(self.particles.particles)}", True, COLORS.UI_TEXT_DIM)
         screen.blit(text, (10, y_offset))
+    
+    def _draw_security_camera(self, surface: pygame.Surface, x: int, y: int, camera):
+        """Draw an animated security camera with vision cone."""
+        from src.entities.game_objects import SecurityCamera
+        
+        # Camera body (small square)
+        body_size = TILE_SIZE // 3
+        body_rect = pygame.Rect(
+            x + TILE_SIZE // 2 - body_size // 2,
+            y + TILE_SIZE // 2 - body_size // 2,
+            body_size, body_size
+        )
+        
+        # Color based on state
+        if camera.is_disabled:
+            body_color = (80, 80, 80)
+            lens_color = (40, 40, 40)
+        elif camera.alert_triggered:
+            body_color = (255, 0, 0)
+            lens_color = (255, 100, 100)
+        elif camera.detection_timer > 0:
+            body_color = (255, 165, 0)
+            lens_color = (255, 200, 100)
+        else:
+            body_color = (100, 100, 150)
+            lens_color = (150, 150, 255)
+        
+        pygame.draw.rect(surface, body_color, body_rect, border_radius=3)
+        
+        # Lens (direction indicator)
+        facing_angle = math.atan2(camera.facing_direction[1], camera.facing_direction[0])
+        lens_x = x + TILE_SIZE // 2 + math.cos(facing_angle) * (body_size // 2)
+        lens_y = y + TILE_SIZE // 2 + math.sin(facing_angle) * (body_size // 2)
+        pygame.draw.circle(surface, lens_color, (int(lens_x), int(lens_y)), 4)
+        
+        # Draw vision cone (simplified)
+        if not camera.is_disabled:
+            cone_color = (*lens_color[:3], 30)
+            cone_surface = pygame.Surface((TILE_SIZE * 8, TILE_SIZE * 8), pygame.SRCALPHA)
+            
+            start_angle = facing_angle - math.radians(camera.vision_angle / 2)
+            end_angle = facing_angle + math.radians(camera.vision_angle / 2)
+            
+            center = (TILE_SIZE * 4, TILE_SIZE * 4)
+            radius = int(camera.vision_range * TILE_SIZE)
+            
+            points = [center]
+            for i in range(20):
+                angle = start_angle + (end_angle - start_angle) * i / 19
+                px = center[0] + math.cos(angle) * radius
+                py = center[1] + math.sin(angle) * radius
+                points.append((px, py))
+            points.append(center)
+            
+            pygame.draw.polygon(cone_surface, cone_color, points)
+            
+            cone_x = x + TILE_SIZE // 2 - TILE_SIZE * 4
+            cone_y = y + TILE_SIZE // 2 - TILE_SIZE * 4
+            surface.blit(cone_surface, (cone_x, cone_y))
+    
+    def _draw_trap_object(self, surface: pygame.Surface, x: int, y: int, trap):
+        """Draw a trap object."""
+        from src.entities.game_objects import Trap
+        
+        if trap.is_hidden:
+            return
+        
+        # Trap appearance
+        if trap.is_triggered:
+            color = (255, 50, 50)
+            inner_color = (200, 0, 0)
+        else:
+            color = (200, 100, 0)
+            inner_color = (150, 50, 0)
+        
+        # Draw as spikes/danger pattern
+        center_x = x + TILE_SIZE // 2
+        center_y = y + TILE_SIZE // 2
+        
+        # Outer danger border
+        danger_rect = pygame.Rect(x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8)
+        pygame.draw.rect(surface, color, danger_rect, 2)
+        
+        # Inner pattern
+        for i in range(3):
+            for j in range(3):
+                spike_x = x + 8 + i * 10
+                spike_y = y + 8 + j * 10
+                pygame.draw.circle(surface, inner_color, (spike_x, spike_y), 2)
+        
+        # Pulsing effect when triggered
+        if trap.is_triggered:
+            pulse = abs(math.sin(self.time * 10)) * 10
+            glow_rect = danger_rect.inflate(pulse, pulse)
+            pygame.draw.rect(surface, (255, 0, 0, 100), glow_rect, 3)
+    
+    def _draw_hiding_spot_object(self, surface: pygame.Surface, x: int, y: int, hiding_spot):
+        """Draw a hiding spot object."""
+        from src.entities.game_objects import HidingSpot
+        
+        # Draw as a locker/crate
+        color = (120, 80, 40)
+        highlight = (150, 110, 70)
+        
+        # Body
+        body_rect = pygame.Rect(x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8)
+        pygame.draw.rect(surface, color, body_rect, border_radius=2)
+        
+        # Highlight edges
+        pygame.draw.rect(surface, highlight, body_rect, 2, border_radius=2)
+        
+        # Vertical lines to indicate slats/doors
+        for i in range(1, 3):
+            line_x = x + (TILE_SIZE // 3) * i
+            pygame.draw.line(surface, highlight, (line_x, y + 6), (line_x, y + TILE_SIZE - 6), 1)
+        
+        # Occupied indicator
+        if hiding_spot.currently_hiding > 0:
+            dot_x = x + TILE_SIZE - 10
+            dot_y = y + 10
+            pygame.draw.circle(surface, (0, 255, 0), (dot_x, dot_y), 4)
+            pygame.draw.circle(surface, (0, 200, 0), (dot_x, dot_y), 2)
