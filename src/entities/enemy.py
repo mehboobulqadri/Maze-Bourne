@@ -12,7 +12,8 @@ from dataclasses import dataclass
 
 from src.core.constants import (
     EnemyType, EnemyState, ENEMY_CONFIG, TILE_SIZE,
-    ENEMY_PATROL_WAIT, ENEMY_ALERT_DURATION, ENEMY_SEARCH_DURATION, ENEMY_CHASE_TIMEOUT
+    ENEMY_PATROL_WAIT, ENEMY_ALERT_DURATION, ENEMY_SEARCH_DURATION, ENEMY_CHASE_TIMEOUT,
+    CellType
 )
 from src.utils.grid import GridPos
 
@@ -28,7 +29,7 @@ class Enemy:
     - SIGHT_GUARD: Long vision cone, slow
     """
     
-    def __init__(self, x: float, y: float, enemy_type: EnemyType = EnemyType.PATROL):
+    def __init__(self, x: float, y: float, enemy_type: EnemyType = EnemyType.PATROL, config_overrides: Optional[dict] = None):
         # Position
         self.pos = GridPos(x, y)
         self.spawn_pos = GridPos(x, y)
@@ -37,12 +38,23 @@ class Enemy:
         self.enemy_type = enemy_type
         self.config = ENEMY_CONFIG.get(enemy_type, ENEMY_CONFIG[EnemyType.PATROL])
         
-        # Stats from config
-        self.speed = self.config["speed"]
+        # Apply Config Overrides (from Director)
+        if config_overrides:
+            # We don't overwrite self.config directly to keep defaults pure, 
+            # but we update the instance stats
+            pass
+
+        # Stats from config (with overrides)
+        self.speed = config_overrides.get("speed_mult", 1.0) * self.config["speed"] if config_overrides else self.config["speed"]
         self.vision_range = self.config["vision_range"]
         self.vision_angle = self.config["vision_angle"]
-        self.hearing_range = self.config["hearing_range"]
+        self.hearing_range = config_overrides.get("hearing_mult", 1.0) * self.config["hearing_range"] if config_overrides else self.config["hearing_range"]
         self.color = self.config["color"]
+        
+        # Active AI Modifiers (Behavioral flags)
+        self.ai_modifiers = set()
+        if config_overrides and "modifiers" in config_overrides:
+             self.ai_modifiers = config_overrides["modifiers"]
         
         # State machine
         self.state = EnemyState.IDLE
@@ -50,9 +62,9 @@ class Enemy:
         self.state_duration = 0.0
         
         # Movement
-        self.facing_direction = GridPos(0, 1)  # Facing down initially
+        self.facing_direction = GridPos(0, 1)
         self.move_timer = 0.0
-        self.move_cooldown = 0.3  # Seconds between moves
+        self.move_cooldown = 0.3
         
         # Patrol
         self.patrol_points: List[GridPos] = []
@@ -61,8 +73,9 @@ class Enemy:
         
         # Detection
         self.last_known_player_pos: Optional[GridPos] = None
-        self.detection_level = 0.0  # 0-100, triggers alert at 100
+        self.detection_level = 0.0
         self.lost_player_timer = 0.0
+        self.attack_cooldown = 0.0
         
         # For sound hunters
         self.last_heard_sound_pos: Optional[GridPos] = None
@@ -79,6 +92,42 @@ class Enemy:
         
         # Generate initial patrol route
         self._generate_patrol_route()
+        
+        # Adaptive AI (for endless mode) - initialized lazily
+        self._adaptive_initialized = False
+        self.checked_hiding_spots = set()
+        self.assigned_search_zone = None
+    
+    # ... (existing methods)
+
+    def update(self, dt: float, game):
+        """Update enemy state."""
+        if not self.is_alive:
+            return
+        
+        player = game.player
+        level = game.level
+        
+         # Timers
+        self.move_timer += dt
+        self.state_timer += dt
+        self.attack_cooldown = max(0, self.attack_cooldown - dt)
+        self.path_update_timer += dt
+        
+        # Get dynamic settings
+        speed_mult = 1.0
+        vision_mult = 1.0
+        smartness = 1.0
+        
+        if hasattr(game, 'settings_manager'):
+            speed_mult = game.settings_manager.get("gameplay", "enemy_speed_multiplier") or 1.0
+            smartness = game.settings_manager.get("gameplay", "enemy_smartness") or 1.0
+            
+        # Apply multipliers
+        self.current_speed = self.speed * speed_mult
+        self.current_vision_range = self.vision_range * vision_mult
+        self.current_smartness = smartness
+
     
     def _generate_patrol_route(self):
         """Generate patrol waypoints around spawn position."""
@@ -117,6 +166,10 @@ class Enemy:
         
         # Update state timer
         self.state_timer += dt
+        
+        # Update attack cooldown
+        if self.attack_cooldown > 0:
+            self.attack_cooldown -= dt
         
         # Update movement timer
         self.move_timer += dt
@@ -220,8 +273,18 @@ class Enemy:
         new_x = self.pos.x + step_x
         new_y = self.pos.y + step_y
         
-        # Check walkability
-        if level.is_walkable(int(new_x), int(new_y)):
+        # Check walkability (and avoid HIDING SPOTS)
+        cell = level.get_cell(int(new_x), int(new_y))
+        
+        can_move_diag = True
+        if step_x != 0 and step_y != 0:
+            # Prevent corner cutting: Require at least one cardinal neighbor to be walkable
+            c1 = level.is_walkable(int(self.pos.x + step_x), int(self.pos.y))
+            c2 = level.is_walkable(int(self.pos.x), int(self.pos.y + step_y))
+            if not c1 and not c2:
+                can_move_diag = False
+
+        if can_move_diag and level.is_walkable(int(new_x), int(new_y)) and (not cell or cell.cell_type != CellType.HIDING_SPOT):
             self.pos.x = new_x
             self.pos.y = new_y
             self.facing_direction = GridPos(step_x, step_y)
@@ -229,14 +292,16 @@ class Enemy:
             return True
         
         # Try horizontal only
-        if step_x != 0 and level.is_walkable(int(self.pos.x + step_x), int(self.pos.y)):
+        cell_x = level.get_cell(int(self.pos.x + step_x), int(self.pos.y))
+        if step_x != 0 and level.is_walkable(int(self.pos.x + step_x), int(self.pos.y)) and (not cell_x or cell_x.cell_type != CellType.HIDING_SPOT):
             self.pos.x += step_x
             self.facing_direction = GridPos(step_x, 0)
             self._reset_move_timer()
             return True
         
         # Try vertical only
-        if step_y != 0 and level.is_walkable(int(self.pos.x), int(self.pos.y + step_y)):
+        cell_y = level.get_cell(int(self.pos.x), int(self.pos.y + step_y))
+        if step_y != 0 and level.is_walkable(int(self.pos.x), int(self.pos.y + step_y)) and (not cell_y or cell_y.cell_type != CellType.HIDING_SPOT):
             self.pos.y += step_y
             self.facing_direction = GridPos(0, step_y)
             self._reset_move_timer()
@@ -320,14 +385,16 @@ class Enemy:
             if angle_diff > self.vision_angle / 2:
                 return False
         
-        # Line of sight check (simple - just check a few points)
-        steps = max(1, int(distance))
+        # Line of sight check (High resolution raycast)
+        # Check every 0.2 tiles to ensure we don't skip corners
+        steps = max(1, int(distance * 5))
         for i in range(1, steps):
             t = i / steps
-            check_x = int(self.pos.x + (player.x - self.pos.x) * t)
-            check_y = int(self.pos.y + (player.y - self.pos.y) * t)
+            check_x = self.pos.x + (player.x - self.pos.x) * t
+            check_y = self.pos.y + (player.y - self.pos.y) * t
             
-            if not level.is_walkable(check_x, check_y):
+            # Check the tile this point is in
+            if not level.is_walkable(int(check_x), int(check_y)):
                 return False
         
         return True
@@ -458,6 +525,22 @@ class Enemy:
             self._change_state(EnemyState.CHASE)
             return
         
+        # Get game reference for adaptive behaviors
+        game = getattr(self, '_game', None)
+        
+        # In endless mode, use adaptive search if available
+        if game and game.game_mode == "endless" and hasattr(game, 'behavior_tracker') and game.behavior_tracker:
+            adaptive_target = self._get_adaptive_search_target(game)
+            if adaptive_target:
+                target_pos = GridPos(adaptive_target[0], adaptive_target[1])
+                if self.pos.distance_to(target_pos) > 0.5:
+                    self._update_pathfinding(target_pos, use_pathfinding=True)
+                    if self.current_path:
+                        self._move_along_path(level)
+                    else:
+                        self._move_toward(target_pos, level)
+                    return
+        
         # Move toward last known position
         if self.last_known_player_pos:
             if self.pos.distance_to(self.last_known_player_pos) > 0.5:
@@ -480,6 +563,42 @@ class Enemy:
         else:
             self._change_state(EnemyState.RETURN)
     
+    def _get_adaptive_search_target(self, game):
+        """
+        Get next search target based on player behavior patterns.
+        Checks favorite hiding spots first, then hot zones.
+        """
+        if not hasattr(game, 'behavior_tracker') or not game.behavior_tracker:
+            return None
+        
+        tracker = game.behavior_tracker
+        current_pos = (int(self.pos.x), int(self.pos.y))
+        
+        # Get likely hiding spots
+        hiding_spots = tracker.get_likely_hiding_spots(top_n=5)
+        unchecked_spots = [s for s in hiding_spots if s not in self.checked_hiding_spots]
+        
+        if unchecked_spots and random.random() < 0.7:  # 70% chance to check hiding spots
+            # Prioritize closest unchecked spot
+            target = min(unchecked_spots, 
+                        key=lambda s: abs(s[0] - current_pos[0]) + abs(s[1] - current_pos[1]))
+            self.checked_hiding_spots.add(target)
+            return target
+        
+        # Get hot zones (frequently visited)
+        hot_zones = tracker.get_hot_zones(min_visits=3)
+        if hot_zones:
+            # Pick random hot zone weighted by proximity
+            target = random.choice(hot_zones)
+            return target
+        
+        return None
+    
+    def reset_adaptive_search(self):
+        """Reset adaptive search state for new search."""
+        self.checked_hiding_spots.clear()
+        self.assigned_search_zone = None
+    
     def _update_chase(self, dt: float, player, level):
         """Chase state - actively pursuing player."""
         # Update last known position if can see
@@ -497,9 +616,9 @@ class Enemy:
         # Chase toward player
         target = GridPos(player.x, player.y)
         
-        # Use A* pathfinding for TRACKER and smart enemies
-        smartness = getattr(self, 'current_smartness', 1.0)
-        use_pathfinding = (self.enemy_type == EnemyType.TRACKER or smartness >= 1.5)
+        # Use A* pathfinding for ALL enemies to avoid getting stuck on walls
+        # The performance cost is worth it for correct movement
+        use_pathfinding = True
         
         if use_pathfinding and self.pathfinder:
             self._update_pathfinding(target, use_pathfinding=True)
@@ -511,7 +630,8 @@ class Enemy:
             self._move_toward(target, level)
         
         # Check for catch
-        if self.pos.distance_to(target) < 0.6:
+        # Reduced hitbox: only damage if actually touching (0.2 tiles) - Very tight!
+        if self.pos.distance_to(target) < 0.2:
             self._catch_player(player)
     
     def _update_return(self, dt: float, player, level):
@@ -532,10 +652,14 @@ class Enemy:
     
     def _catch_player(self, player):
         """Handle catching the player."""
+        if self.attack_cooldown > 0:
+            return
+            
         # Deal damage
         if hasattr(player, 'take_damage'):
             game = getattr(self, '_game', None)
             player.take_damage(1, game)
+            self.attack_cooldown = 1.0  # 1 second cooldown between attacks
     
     def get_render_color(self) -> Tuple[int, int, int]:
         """Get the render color based on type and state."""

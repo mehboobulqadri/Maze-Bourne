@@ -63,7 +63,7 @@ class Game:
         # Display setup
         self.screen = pygame.display.set_mode(
             (WINDOW_WIDTH, WINDOW_HEIGHT),
-            pygame.DOUBLEBUF | pygame.HWSURFACE
+            pygame.DOUBLEBUF | pygame.HWSURFACE | pygame.RESIZABLE
         )
         pygame.display.set_caption(WINDOW_TITLE)
         
@@ -100,6 +100,7 @@ class Game:
         # Campaign progress
         self.current_level_num = 1
         self.reset_level_requested = False
+        self.game_mode = "campaign" # "campaign" or "endless"
         
         # Debug mode
         self.debug_mode = DEBUG_MODE
@@ -113,6 +114,21 @@ class Game:
         
         # Editor (needs fonts)
         self.editor = Editor(self)
+        
+        # Entities
+        self.enemies = []
+        from src.entities.game_objects import GameObjectManager
+        self.game_objects = GameObjectManager()
+        
+        # AI Director (Adaptive Difficulty)
+        from src.core.director import AIDirector
+        self.director = AIDirector()
+        
+        # Player Behavior Tracker (for endless mode adaptive AI)
+        self.behavior_tracker = None  # Initialized in endless mode
+        
+        # LLM Strategist (for endless mode enemy coordination)
+        self.strategist = None  # Initialized in endless mode
         
         # Register default state handlers
         self._setup_default_handlers()
@@ -364,7 +380,13 @@ class Game:
     
     def _menu_action(self, action):
         if action == "play":
+            self.game_mode = "campaign"
             self.change_state(GameState.LEVEL_SELECT)
+        elif action == "endless":
+            self.game_mode = "endless"
+            self.current_level_num = 1
+            self.reset_level_requested = True
+            self.change_state(GameState.PLAYING)
         elif action == "settings":
             self.change_state(GameState.SETTINGS)
         elif action == "editor":
@@ -398,13 +420,15 @@ class Game:
         # UI Setup
         cx = SCREEN_WIDTH // 2
         cy = SCREEN_HEIGHT // 2
-        btn_w, btn_h = 240, 50
-        gap = 60
+        btn_w, btn_h = 300, 50
+        gap = 50
         
         self.menu_buttons = [
-            Button(cx - btn_w//2, cy - 20, btn_w, btn_h, "PLAY", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20, btn_w, btn_h, "PLAY CAMPAIGN", self.font_medium, 
                    action=lambda: self._menu_action("play")),
-            Button(cx - btn_w//2, cy - 20 + gap, btn_w, btn_h, "SETTINGS", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap, btn_w, btn_h, "ENDLESS RUN", self.font_medium, 
+                   action=lambda: self._menu_action("endless")),
+            Button(cx - btn_w//2, cy - 20 + gap*2, btn_w, btn_h, "SETTINGS", self.font_medium, 
                    action=lambda: self._menu_action("settings")),
             Button(cx - btn_w//2, cy - 20 + gap*2, btn_w, btn_h, "ACHIEVEMENTS", self.font_medium, 
                    action=lambda: self._menu_action("achievements")),
@@ -426,14 +450,111 @@ class Game:
              Button(cx - 120, SCREEN_HEIGHT - 90, 240, 55, "BACK", self.font_medium, 
                    action=lambda: self.change_state(GameState.MENU))
         ]
+        self.help_scroll_y = 0
+        self.max_scroll = 0 # Will be calculated in render
 
     def _help_update(self, dt: float):
         mouse_pos = pygame.mouse.get_pos()
         mouse_click = pygame.mouse.get_pressed()[0]
+        
+        # Handle Scrolling
+        for event in pygame.event.get(pygame.MOUSEWHEEL):
+             self.help_scroll_y += event.y * 30
+             
+        # Clamp Scroll
+        screen_h = SCREEN_HEIGHT - 150 # Visible area approx
+        min_scroll = -(self.max_scroll - screen_h) if self.max_scroll > screen_h else 0
+        self.help_scroll_y = max(min_scroll, min(0, self.help_scroll_y))
+        
         for btn in self.help_buttons:
              btn.update(mouse_pos, mouse_click, self.audio_manager)
+        
         if self.is_key_just_pressed(pygame.K_ESCAPE):
              self.change_state(GameState.MENU)
+
+    def _help_render(self):
+        """Render help screen with enemy info."""
+        self.screen.fill(COLORS.BACKGROUND)
+        
+        # Draw Title (Fixed)
+        title = self.font_large.render("HELP & GUIDE", True, COLORS.UI_TEXT)
+        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 50)))
+        
+        # Scrollable Area Config
+        start_y = 120 + self.help_scroll_y
+        current_y = start_y
+        left_margin = SCREEN_WIDTH // 2 - 300
+        
+        # --- CONTROLS SECTION ---
+        header = self.font_medium.render("CONTROLS", True, COLORS.KEY)
+        self.screen.blit(header, (left_margin, current_y))
+        current_y += 50
+        
+        controls = [
+            ("WASD / Arrows", "Move Player"),
+            ("SHIFT", "Hold to Walk (Silent)"),
+            ("SPACE", "Dash (Uses Energy)"),
+            ("E", "Interact (Doors, Hiding Spots)"),
+            ("ESC", "Pause / Back")
+        ]
+        
+        for key, desc in controls:
+            k_surf = self.font_small.render(key, True, COLORS.UI_TEXT_DIM)
+            d_surf = self.font_small.render(desc, True, COLORS.UI_TEXT)
+            self.screen.blit(k_surf, (left_margin, current_y))
+            self.screen.blit(d_surf, (left_margin + 250, current_y))
+            current_y += 35
+            
+        current_y += 40
+        
+        # --- ENEMIES SECTION ---
+        header = self.font_medium.render("ENEMIES", True, COLORS.ENEMY_PATROL)
+        self.screen.blit(header, (left_margin, current_y))
+        current_y += 50
+        
+        # Import config if needed or use constants
+        from src.core.constants import ENEMY_CONFIG, EnemyType
+        
+        enemy_data = [
+            (EnemyType.PATROL, "Patrol Guard", "Standard guard. Follows a fixed path.", "Normal"),
+            (EnemyType.TRACKER, "Tracker", "Fast runner. 360  Vision but short range. Follows trails.", "Fast"),
+            (EnemyType.SOUND_HUNTER, "Sound Hunter", "Blind. Relies on hearing. Don't run near him!", "Fast"),
+            (EnemyType.SIGHT_GUARD, "Sniper", "Slow. Sees very far. Avoid long corridors.", "Slow"),
+        ]
+        
+        for e_type, name, desc, speed_desc in enemy_data:
+            config = ENEMY_CONFIG[e_type]
+            color = config["color"]
+            
+            # Draw Sprite Icon
+            pygame.draw.circle(self.screen, color, (left_margin + 20, int(current_y + 15)), 15)
+            # Eyes/Details
+            pygame.draw.circle(self.screen, (255,255,255), (left_margin + 20, int(current_y + 15)), 6)
+            
+            # Name & Speed
+            name_surf = self.font_medium.render(f"{name} ({speed_desc})", True, color)
+            self.screen.blit(name_surf, (left_margin + 60, current_y))
+            
+            # Description
+            desc_surf = self.font_tiny.render(desc, True, COLORS.UI_TEXT_DIM)
+            self.screen.blit(desc_surf, (left_margin + 60, current_y + 35))
+            
+            current_y += 80
+            
+        # Draw Buttons (Fixed on top or bottom?)
+        # Drawing them last ensures they are on top of scrolled content
+        # Clear bottom area for back button
+        bottom_bar = pygame.Surface((SCREEN_WIDTH, 100))
+        bottom_bar.fill(COLORS.BACKGROUND)
+        self.screen.blit(bottom_bar, (0, SCREEN_HEIGHT - 100))
+        
+        for btn in self.help_buttons:
+            btn.draw(self.screen)
+            
+        # Calculate max scroll for next frame clamping
+        # Total content height = current_y - start_y
+        total_h = current_y - self.help_scroll_y
+        self.max_scroll = total_h
     def _menu_update(self, dt: float):
         """Update menu state."""
         # Pan Camera
@@ -791,9 +912,26 @@ class Game:
             GameObjectManager, SecurityCamera, Trap, HidingSpot
         )
         
-        # Create campaign level
-        print(f"[Maze Bourne] Loading Campaign Level {self.current_level_num}...")
-        self.level = Level.from_campaign(self.current_level_num)
+        if self.game_mode == "endless":
+            print(f"[Maze Bourne] Loading Endless Floor {self.current_level_num}...")
+            self.level = Level.from_endless(self.current_level_num)
+            
+            # Initialize behavior tracker for endless mode (or keep existing one)
+            from src.ai.player_tracker import PlayerBehaviorTracker
+            if self.behavior_tracker is None:
+                self.behavior_tracker = PlayerBehaviorTracker()
+            else:
+                # Reset per-floor data but keep cumulative stats
+                self.behavior_tracker.reset_for_new_floor()
+            
+            # Initialize LLM strategist for endless mode
+            from src.ai.strategist import EnemyStrategist
+            if not hasattr(self, 'strategist') or self.strategist is None:
+                self.strategist = EnemyStrategist(self.settings_manager)
+        else:
+            # Create campaign level
+            print(f"[Maze Bourne] Loading Campaign Level {self.current_level_num}...")
+            self.level = Level.from_campaign(self.current_level_num)
         
         # Create player at spawn point with difficulty-based health
         spawn_x, spawn_y = self.level.spawn_point
@@ -812,24 +950,48 @@ class Game:
         self.renderer.menu_mode = False  # Disable menu mode for gameplay FOV
         self.renderer.add_notification(f"Level {self.current_level_num}", duration=3.0)
         
+        # Get AI Modifiers for this level
+        enemy_modifiers = self.director.get_enemy_config_modifiers()
+        enemy_modifiers["modifiers"] = self.director.active_modifiers
+        
         # Spawn enemies from level config
         self.enemies = []
         for config in self.level.get_enemy_configs():
-            enemy = Enemy(config["x"], config["y"], config["type"])
+            enemy = Enemy(config["x"], config["y"], config["type"], config_overrides=enemy_modifiers)
             self.enemies.append(enemy)
         
         # Initialize game objects manager and spawn objects
         self.game_object_manager = GameObjectManager()
         
-        # Spawn cameras
+        # Spawn cameras with smart rotation
         for i, pos in enumerate(self.level.camera_positions):
+            # Check valid directions
+            valid_stats = []
+            
+            # Check 4 cardinals
+            cx, cy = int(pos[0]), int(pos[1])
+            candidates = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+            valid_dirs = []
+            
+            for dx, dy in candidates:
+                if self.level.is_walkable(cx + dx, cy + dy):
+                    valid_dirs.append((dx, dy))
+            
+            # Fallback if trapped (e.g. inside walls?)
+            if not valid_dirs:
+                valid_dirs = [(1, 0)]
+                
+            rotation_pat = valid_dirs
+            # If we have multiple directions, use them for rotation
+            # If only 1, the list will have 1 item and rotation effectively pauses on it (or loops)
+            
             camera = SecurityCamera(
                 x=pos[0], y=pos[1],
                 camera_id=f"cam_{i}",
                 vision_range=6.0,
                 vision_angle=90.0,
-                facing_direction=(1, 0),
-                rotation_pattern=[(1, 0), (0, 1), (-1, 0), (0, -1)],
+                facing_direction=rotation_pat[0],
+                rotation_pattern=rotation_pat,
                 rotation_wait=2.0
             )
             self.game_object_manager.add(camera)
@@ -880,7 +1042,28 @@ class Game:
         
         # Update stats tracker
         if self.player:
-            self.stats_tracker.update(dt, getattr(self.player, 'is_stealthed', False))
+            is_moving = getattr(self.player, '_move_input', (0,0)) != (0,0) and not getattr(self.player, 'is_hidden', False)
+            
+            # Record distance if moving
+            if is_moving:
+                # Approximate distance for this frame
+                speed = self.player.speed
+                if self.player.is_stealthed:
+                    speed *= 0.6  # approx stealth mult
+                self.stats_tracker.record_movement(speed * dt)
+                
+            self.stats_tracker.update(dt, 
+                                      is_stealthed=getattr(self.player, 'is_stealthed', False),
+                                      is_hiding=getattr(self.player, 'is_hidden', False),
+                                      is_moving=is_moving)
+            
+            # Update behavior tracker for endless mode
+            if self.game_mode == "endless" and self.behavior_tracker:
+                self.behavior_tracker.record_position(
+                    self.player.x, self.player.y,
+                    is_stealthed=getattr(self.player, 'is_stealthed', False),
+                    dt=dt
+                )
         
         # Update game systems
         if self.player:
@@ -1044,7 +1227,7 @@ class Game:
         # But we should recreate them to ensure correct state/position
         cx = SCREEN_WIDTH // 2
         cy = SCREEN_HEIGHT // 2
-        btn_w, btn_h = 240, 50
+        btn_w, btn_h = 300, 50
         gap = 65
         start_y = cy - gap
         
@@ -1117,6 +1300,10 @@ class Game:
     def _victory_update(self, dt: float):
         """Update victory state."""
         if self.is_key_just_pressed(pygame.K_RETURN):
+            # Analyze performance for AI adaptation
+            if self.director:
+                self.director.analyze_level_stats(self.stats_tracker)
+                
             # Next level
             self.current_level_num += 1
             self.reset_level_requested = True
@@ -1134,7 +1321,8 @@ class Game:
         cy = SCREEN_HEIGHT // 2
         
         # Title
-        title = self.font_large.render("LEVEL COMPLETE!", True, COLORS.EXIT)
+        title_text = f"FLOOR {self.current_level_num} CLEARED!" if self.game_mode == "endless" else "LEVEL COMPLETE!"
+        title = self.font_large.render(title_text, True, COLORS.EXIT)
         title_rect = title.get_rect(center=(cx, cy - 180))
         self.screen.blit(title, title_rect)
         

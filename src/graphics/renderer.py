@@ -88,6 +88,8 @@ class Camera:
         # So (world_x - self.x) becomes (world_x - (-offset)) = world_x + offset
         return (int(world_x - self.x + shake_x), int(world_y - self.y + shake_y))
     
+
+    
     def is_visible(self, world_x: float, world_y: float, 
                    width: float = TILE_SIZE, height: float = TILE_SIZE) -> bool:
         return (world_x + width > self.x and world_x < self.x + self.view_width and
@@ -190,6 +192,10 @@ class Renderer:
         # Clear particles and notifications on new level
         self.particles.particles.clear()
         self.notifications.clear()
+        
+        # Performance Cache
+        self._vision_polygon_cache = {}
+        self._last_level_update_time = 0.0
     
     def update(self, dt: float):
         self.time += dt
@@ -302,6 +308,65 @@ class Renderer:
         # Check endpoint (wall is visible)
         return True
 
+    def _calculate_vision_polygon(self, center_x, center_y, facing_angle, fov_deg, range_tiles, num_rays=20):
+        """Calculate polygon points for a vision cone that is blocked by walls."""
+        # Quantize inputs for better cache hit rate (e.g. slight float errors)
+        # Round positions to 2 decimal places, angle to 2 decimal places
+        cache_key = (
+            round(center_x, 2), 
+            round(center_y, 2), 
+            round(facing_angle, 2), 
+            fov_deg, 
+            range_tiles, 
+            getattr(self.game.level, 'last_update_id', 0) # Invalidate if level changes (e.g. doors)
+        )
+        
+        if cache_key in self._vision_polygon_cache:
+            return self._vision_polygon_cache[cache_key]
+            
+        points = [(center_x * TILE_SIZE + TILE_SIZE//2, center_y * TILE_SIZE + TILE_SIZE//2)]
+        
+        start_angle = facing_angle - math.radians(fov_deg / 2)
+        angle_step = math.radians(fov_deg) / (num_rays - 1)
+        
+        level = self.game.level
+        if not level:
+            return points
+            
+        for i in range(num_rays):
+            angle = start_angle + angle_step * i
+            
+            # Raycast
+            ray_dx = math.cos(angle)
+            ray_dy = math.sin(angle)
+            
+            hit_dist = range_tiles
+            
+            # Optimized Raycast: Check less frequently for long ranges? 
+            # No, keep accuracy but use caching to save perf
+            steps = int(range_tiles * 5)
+            for s in range(1, steps + 1):
+                dist = s / 5.0
+                check_x = center_x + ray_dx * dist
+                check_y = center_y + ray_dy * dist
+                
+                # Check wall
+                if not level.is_walkable(int(check_x), int(check_y)):
+                    hit_dist = dist
+                    break
+            
+            # Calculate world point
+            px = (center_x + ray_dx * hit_dist) * TILE_SIZE + TILE_SIZE//2
+            py = (center_y + ray_dy * hit_dist) * TILE_SIZE + TILE_SIZE//2
+            points.append((px, py))
+            
+        # Limit cache size casually
+        if len(self._vision_polygon_cache) > 1000:
+            self._vision_polygon_cache.clear()
+            
+        self._vision_polygon_cache[cache_key] = points
+        return points
+
     def render(self, screen: pygame.Surface):
         # Clear with black (Fog)
         screen.fill(COLORS.VOID)
@@ -309,6 +374,10 @@ class Renderer:
         # Only render visible stuff
         # Draw level
         self._render_floor(screen)
+        
+        # Draw Vision Cones (BELOW WALLS)
+        self._render_all_vision_cones(screen)
+        
         self._render_walls(screen)
         self._render_objects(screen)
         
@@ -391,6 +460,65 @@ class Renderer:
             if (grid_x + grid_y) % 5 == 0:
                 hl_color = tuple(int(c * brightness_mult) for c in COLORS.WALL_HIGHLIGHT)
                 pygame.draw.rect(surface, hl_color, (x + 4, y + 4, 6, 6), 1)
+
+    def _render_all_vision_cones(self, screen: pygame.Surface):
+        """Render all vision cones (Enemies + Cameras) before walls."""
+        from src.entities.game_objects import SecurityCamera
+        
+        # 1. Render Enemy Cones
+        for enemy in self.game.enemies:
+            if not enemy.is_alive or getattr(enemy, 'is_hiding', False):
+                continue
+                
+            if enemy.vision_range > 0:
+                facing_angle = math.atan2(enemy.facing_direction.y, enemy.facing_direction.x)
+                
+                # Get clipped polygon points
+                world_points = self._calculate_vision_polygon(
+                    enemy.pos.x, enemy.pos.y, 
+                    facing_angle, enemy.vision_angle, enemy.vision_range
+                )
+                
+                self._draw_vision_polygon(screen, world_points, enemy.get_render_color())
+
+        # 2. Render Camera Cones
+        for obj in self.game.game_objects.objects:
+            if isinstance(obj, SecurityCamera) and not obj.is_disabled:
+                facing_angle = math.atan2(obj.facing_direction[1], obj.facing_direction[0])
+                
+                # Get clipped polygon points
+                world_points = self._calculate_vision_polygon(
+                    obj.x, obj.y,
+                    facing_angle, obj.vision_angle, obj.vision_range
+                )
+                
+                lens_color = (255, 100, 100) if obj.alert_triggered else (150, 150, 255)
+                self._draw_vision_polygon(screen, world_points, lens_color)
+
+    def _draw_vision_polygon(self, screen, world_points, color_base):
+        """Helper to draw a single vision polygon."""
+        if len(world_points) > 2:
+            # Convert to SCREEN coordinates
+            screen_points = []
+            for wx, wy in world_points:
+                    sx, sy = self.camera.world_to_screen(wx, wy)
+                    screen_points.append((sx, sy))
+            
+            # Draw
+            min_x = min(p[0] for p in screen_points)
+            min_y = min(p[1] for p in screen_points)
+            max_x = max(p[0] for p in screen_points)
+            max_y = max(p[1] for p in screen_points)
+            w, h = max(1, max_x - min_x), max(1, max_y - min_y)
+            
+            surf = pygame.Surface((w, h), pygame.SRCALPHA)
+            local_points = [(p[0] - min_x, p[1] - min_y) for p in screen_points]
+            
+            # Lower alpha for subtlety
+            cone_color = (*color_base[:3], 25) # 25 alpha (was 40)
+            
+            pygame.draw.polygon(surf, cone_color, local_points)
+            screen.blit(surf, (min_x, min_y))
 
     def _render_walls(self, screen: pygame.Surface):
         level = self.game.level
@@ -494,6 +622,8 @@ class Renderer:
                     self._draw_key(screen, screen_x, screen_y)
                 elif cell.cell_type == CellType.DOOR:
                     self._draw_door(screen, screen_x, screen_y, cell.is_locked)
+                elif cell.cell_type == CellType.PRIVACY_DOOR:
+                    self._draw_privacy_door(screen, screen_x, screen_y, cell.is_locked)
                 elif cell.cell_type == CellType.EXIT:
                     self._draw_exit(screen, screen_x, screen_y)
                 elif cell.cell_type == CellType.TRAP and not is_dim:
@@ -511,6 +641,8 @@ class Renderer:
             self._draw_key(screen, screen_x, screen_y)
         elif cell.cell_type == CellType.DOOR:
             self._draw_door(screen, screen_x, screen_y, cell.is_locked)
+        elif cell.cell_type == CellType.PRIVACY_DOOR:
+            self._draw_privacy_door(screen, screen_x, screen_y, cell.is_locked)
         elif cell.cell_type == CellType.EXIT:
             self._draw_exit(screen, screen_x, screen_y)
         elif cell.cell_type == CellType.TRAP:
@@ -691,6 +823,37 @@ class Renderer:
                              (x + TILE_SIZE // 2, y + TILE_SIZE // 2 - 4), 6)
             pygame.draw.rect(surface, (60, 50, 40), 
                            (x + TILE_SIZE // 2 - 4, y + TILE_SIZE // 2, 8, 10))
+
+    def _draw_privacy_door(self, surface: pygame.Surface, x: int, y: int, is_locked: bool):
+        """Draw privacy door with distinct visual (no key required, blocks vision when closed)."""
+        # Cyan/teal color scheme to distinguish from regular doors
+        if is_locked:
+            color = (40, 100, 110)  # Dark teal - closed/blocking
+            frame_color = (60, 140, 150)  # Brighter teal frame
+        else:
+            color = (60, 160, 140)  # Brighter - open/transparent
+            frame_color = (80, 200, 180)  # Bright cyan frame
+        
+        pygame.draw.rect(surface, color, (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8))
+        
+        # Frame with distinctive bars
+        pygame.draw.rect(surface, frame_color, 
+                        (x + 4, y + 4, TILE_SIZE - 8, TILE_SIZE - 8), 2)
+        
+        # Horizontal bars to show it's a door
+        bar_color = frame_color if is_locked else (80, 200, 180)
+        for i in range(3):
+            bar_y = y + 10 + i * 8
+            pygame.draw.line(surface, bar_color, 
+                           (x + 8, bar_y), (x + TILE_SIZE - 8, bar_y), 2)
+        
+        if is_locked:
+            # Eye icon to show vision-blocking
+            eye_x = x + TILE_SIZE // 2
+            eye_y = y + TILE_SIZE // 2
+            pygame.draw.ellipse(surface, (80, 160, 170), 
+                              (eye_x - 6, eye_y - 3, 12, 6))
+            pygame.draw.circle(surface, (30, 70, 80), (eye_x, eye_y), 2)
     
     def _draw_exit(self, surface: pygame.Surface, x: int, y: int):
         """Draw pulsing exit."""
@@ -874,9 +1037,9 @@ class Renderer:
             ])
         elif enemy.state in [EnemyState.ALERT, EnemyState.CHASE]:
             pygame.draw.rect(screen, (255, 50, 50), 
-                           (screen_x + TILE_SIZE // 2 - 2, screen_y - 16, 4, 10))
-            pygame.draw.rect(screen, (255, 50, 50), 
                            (screen_x + TILE_SIZE // 2 - 2, screen_y - 4, 4, 4))
+                           
+
     
     def _render_ui(self, screen: pygame.Surface):
         player = self.game.player
@@ -986,8 +1149,8 @@ class Renderer:
         
         # Speedrun Timer (Top Right)
         if hasattr(self.game, 'stats_tracker'):
-            import time
-            elapsed = time.time() - self.game.stats_tracker.current_level_start_time
+            # Use tracked gameplay time (handles pauses correctly)
+            elapsed = self.game.stats_tracker.current_total_time
             timer_text = self._format_speedrun_time(elapsed)
             
             # Determine color based on star projection
@@ -1018,7 +1181,9 @@ class Renderer:
             star_display_y = timer_rect.bottom + 15
             star_size = 12
             star_spacing = 28
-            star_start_x = SCREEN_WIDTH - 20 - star_spacing * 1.5
+            # Center the group of 3 stars relative to the timer text
+            # Total width = 2 * star_spacing. Center is at index 1.
+            star_start_x = timer_rect.centerx - star_spacing
             
             for i in range(3):
                 star_x = star_start_x + i * star_spacing
@@ -1123,29 +1288,7 @@ class Renderer:
         pygame.draw.circle(surface, lens_color, (int(lens_x), int(lens_y)), 4)
         
         # Draw vision cone (simplified)
-        if not camera.is_disabled:
-            cone_color = (*lens_color[:3], 30)
-            cone_surface = pygame.Surface((TILE_SIZE * 8, TILE_SIZE * 8), pygame.SRCALPHA)
-            
-            start_angle = facing_angle - math.radians(camera.vision_angle / 2)
-            end_angle = facing_angle + math.radians(camera.vision_angle / 2)
-            
-            center = (TILE_SIZE * 4, TILE_SIZE * 4)
-            radius = int(camera.vision_range * TILE_SIZE)
-            
-            points = [center]
-            for i in range(20):
-                angle = start_angle + (end_angle - start_angle) * i / 19
-                px = center[0] + math.cos(angle) * radius
-                py = center[1] + math.sin(angle) * radius
-                points.append((px, py))
-            points.append(center)
-            
-            pygame.draw.polygon(cone_surface, cone_color, points)
-            
-            cone_x = x + TILE_SIZE // 2 - TILE_SIZE * 4
-            cone_y = y + TILE_SIZE // 2 - TILE_SIZE * 4
-            surface.blit(cone_surface, (cone_x, cone_y))
+
     
     def _draw_trap_object(self, surface: pygame.Surface, x: int, y: int, trap):
         """Draw a trap object."""

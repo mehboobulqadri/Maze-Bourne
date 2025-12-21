@@ -4,7 +4,7 @@ Implements raycasting for realistic enemy vision with obstacle blocking.
 """
 
 from src.utils.grid import GridPos
-from src.levels.maze_generator import CellType
+from src.core.constants import CellType
 import math
 
 class LineOfSight:
@@ -89,8 +89,15 @@ class LineOfSight:
         
         cell = self.maze[pos]
         
-        # Walls and doors block sight
-        return cell.type in [CellType.WALL, CellType.DOOR]
+        # Walls always block sight
+        if cell.type == CellType.WALL:
+            return True
+        
+        # Doors and Privacy doors only block sight when closed (is_locked=True)
+        if cell.type in [CellType.DOOR, CellType.PRIVACY_DOOR]:
+            return getattr(cell, 'is_locked', True)  # Default to blocking if no state
+        
+        return False
     
     def get_vision_cone_positions(self, start: GridPos, direction: GridPos, 
                                 cone_angle: float = 90.0, max_distance: float = 6.0) -> list:

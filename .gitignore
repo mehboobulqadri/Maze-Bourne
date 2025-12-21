@@ -16,3 +16,7 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+achievements.json
+stats.json
+settings.json

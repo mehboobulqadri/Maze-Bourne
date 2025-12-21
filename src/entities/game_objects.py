@@ -99,7 +99,77 @@ class Door(GameObject):
         print(f"[Door] Door {self.door_id} unlocked remotely")
 
 
-@dataclass
+@dataclass 
+class PrivacyDoor(GameObject):
+    """
+    Corridor door that blocks enemy vision but doesn't require a key.
+    Used in Endless Mode to create tension and strategic chokepoints.
+    """
+    is_locked: bool = True  # Closed by default, blocking sight
+    door_id: str = "privacy_default"
+    last_opened_time: float = 0.0
+    auto_close_delay: float = 3.0  # Seconds before door auto-closes after player passes
+    
+    def is_walkable(self) -> bool:
+        """Privacy doors are always walkable, but state affects visibility."""
+        return not self.is_locked
+    
+    def on_interact(self, player, game) -> bool:
+        """Toggle door open/closed. No key required."""
+        if self.is_locked:
+            # Open the door
+            self.is_locked = False
+            self.last_opened_time = time.time()
+            
+            # Update level collision
+            if game and game.level:
+                game.level.opened_doors.add((int(self.x), int(self.y)))
+                # Also mark the cell as unlocked for line of sight
+                cell = game.level.get_cell(int(self.x), int(self.y))
+                if cell:
+                    cell.is_locked = False
+                    
+            print(f"[PrivacyDoor] Opened door {self.door_id}")
+        else:
+            # Close the door
+            self.is_locked = True
+            
+            # Update level collision  
+            if game and game.level:
+                pos = (int(self.x), int(self.y))
+                if pos in game.level.opened_doors:
+                    game.level.opened_doors.remove(pos)
+                # Mark cell as locked for line of sight
+                cell = game.level.get_cell(int(self.x), int(self.y))
+                if cell:
+                    cell.is_locked = True
+                    
+            print(f"[PrivacyDoor] Closed door {self.door_id}")
+        return True
+    
+    def update(self, dt: float, game):
+        """Auto-close door after delay if player is not nearby."""
+        if not self.is_locked and self.auto_close_delay > 0:
+            current_time = time.time()
+            if current_time - self.last_opened_time >= self.auto_close_delay:
+                # Check if player is near the door
+                if game.player:
+                    px, py = int(game.player.x), int(game.player.y)
+                    dx, dy = abs(px - self.x), abs(py - self.y)
+                    # Only auto-close if player is more than 2 tiles away
+                    if dx > 2 or dy > 2:
+                        self.is_locked = True
+                        # Update level state
+                        if game and game.level:
+                            pos = (int(self.x), int(self.y))
+                            if pos in game.level.opened_doors:
+                                game.level.opened_doors.remove(pos)
+                            cell = game.level.get_cell(int(self.x), int(self.y))
+                            if cell:
+                                cell.is_locked = True
+                        print(f"[PrivacyDoor] Auto-closed door {self.door_id}")
+
+
 class Lever(GameObject):
     """Lever that toggles connected objects (doors, cameras, traps)."""
     is_on: bool = False
@@ -216,14 +286,18 @@ class SecurityCamera(GameObject):
         if angle_diff > self.vision_angle / 2:
             return False
         
-        # Line of sight (simplified)
+        # Line of sight (High resolution raycast)
         if level:
-            steps = max(1, int(distance))
+            # Check every 0.2 tiles to ensure we don't skip corners
+            steps = max(1, int(distance * 5))
             for i in range(1, steps):
                 t = i / steps
-                check_x = int(self.x + dx * t)
-                check_y = int(self.y + dy * t)
-                if not level.is_walkable(check_x, check_y):
+                check_x = self.x + dx * t
+                check_y = self.y + dy * t
+                
+                # Check actual walkability of cell
+                # We cast to int() which floors, getting the cell index
+                if not level.is_walkable(int(check_x), int(check_y)):
                     return False
         
         return True
@@ -302,6 +376,11 @@ class HidingSpot(GameObject):
             player.is_hidden = False
             player.hiding_spot = None
             self.currently_hiding -= 1
+            
+            # Record hiding exit for behavior tracker
+            if hasattr(game, 'behavior_tracker') and game.behavior_tracker:
+                game.behavior_tracker.record_hide((int(self.x), int(self.y)), is_entering=False)
+            
             print(f"[HidingSpot] Player left hiding spot")
             return True
         elif self.currently_hiding < self.capacity:
@@ -309,6 +388,11 @@ class HidingSpot(GameObject):
             player.is_hidden = True
             player.hiding_spot = self
             self.currently_hiding += 1
+            
+            # Record hiding enter for behavior tracker
+            if hasattr(game, 'behavior_tracker') and game.behavior_tracker:
+                game.behavior_tracker.record_hide((int(self.x), int(self.y)), is_entering=True)
+            
             print(f"[HidingSpot] Player is now hiding")
             return True
         

@@ -77,14 +77,27 @@ class StatsTracker:
         self.current_level_start_time = time.time()
         self.current_damage_taken = 0
         self.current_times_spotted = 0
-        self.current_stealth_time = 0.0
-        self.current_total_time = 0.0
+        self.current_time_in_hiding = 0.0
+        self.current_stationary_time = 0.0
+        self.current_distance_traveled = 0.0
     
-    def update(self, dt: float, is_stealthed: bool = False):
+    def update(self, dt: float, is_stealthed: bool = False, 
+               is_hiding: bool = False, is_moving: bool = False):
         """Update ongoing level stats."""
         self.current_total_time += dt
+        
         if is_stealthed:
             self.current_stealth_time += dt
+        
+        if is_hiding:
+            self.current_time_in_hiding += dt
+            
+        if not is_moving:
+            self.current_stationary_time += dt
+            
+    def record_movement(self, distance: float):
+        """Record distance moved."""
+        self.current_distance_traveled += distance
     
     def record_damage(self):
         """Record player taking damage."""
@@ -103,7 +116,9 @@ class StatsTracker:
         Record level completion and calculate performance.
         Returns: (stars, is_new_best_time, is_new_best_stars)
         """
-        completion_time = time.time() - self.current_level_start_time
+        # Use accumulated actual gameplay time (dt sum) instead of wall clock
+        # This correctly handles pauses
+        completion_time = self.current_total_time
         stealth_percentage = (self.current_stealth_time / max(0.01, self.current_total_time)) * 100
         
         # Calculate star rating based on time

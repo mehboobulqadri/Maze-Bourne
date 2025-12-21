@@ -144,28 +144,28 @@ ENEMY_CHASE_TIMEOUT = 5.0    # Lose interest after X seconds
 # Per-type configuration
 ENEMY_CONFIG = {
     EnemyType.PATROL: {
-        "speed": 2.5,
+        "speed": 2.2,  # Standard pace
         "vision_range": 5.0,
         "vision_angle": 120,
         "hearing_range": 4.0,
         "color": COLORS.ENEMY_PATROL,
     },
     EnemyType.TRACKER: {
-        "speed": 4.0,
-        "vision_range": 6.0,
+        "speed": 4.2,  # Fast but short sighted
+        "vision_range": 4.0,  # Nerfed from 6.0
         "vision_angle": 360,
         "hearing_range": 6.0,
         "color": COLORS.ENEMY_TRACKER,
     },
     EnemyType.SOUND_HUNTER: {
-        "speed": 3.5,
+        "speed": 3.2,  # Faster than patrol
         "vision_range": 3.0,
         "vision_angle": 90,
         "hearing_range": 15.0,
         "color": COLORS.ENEMY_SOUND,
     },
     EnemyType.SIGHT_GUARD: {
-        "speed": 2.0,
+        "speed": 1.8,  # Slow but sees far
         "vision_range": 10.0,
         "vision_angle": 60,
         "hearing_range": 5.0,
@@ -199,6 +199,7 @@ class CellType(Enum):
     TRAP = 9
     HIDING_SPOT = 10
     ENEMY_SPAWN = 11
+    PRIVACY_DOOR = 12  # Corridor door that doesn't require key, blocks enemy vision
 
 # Maze sizes per level difficulty
 LEVEL_SIZES = {
@@ -219,6 +220,11 @@ MAX_ROOMS = 8
 MIN_ROOM_SIZE = 4
 MAX_ROOM_SIZE = 8
 CORRIDOR_WIDTH = 2
+
+# Door behavior (Endless Mode)
+DOOR_AUTO_CLOSE_DELAY = 3.0  # Seconds before privacy door auto-closes
+PRIVACY_DOOR_PLACEMENT_RATE = 0.7  # 70% chance in endless mode corridors
+
 
 # =============================================================================
 # GAME STATES

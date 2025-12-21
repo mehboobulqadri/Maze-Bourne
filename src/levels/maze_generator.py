@@ -58,6 +58,8 @@ class Cell:
             return False
         if self.cell_type == CellType.DOOR and self.is_locked:
             return False
+        if self.cell_type == CellType.PRIVACY_DOOR and self.is_locked:
+            return False
         return True
 
 
@@ -103,6 +105,10 @@ class MazeGenerator:
             self._generate_recursive_backtracking()
         elif algorithm == "rooms":
             self._generate_room_corridor()
+        elif algorithm == "endless":
+             # Endless mode: Hybrid of Rooms and winding Alleys
+             # Start with sparse rooms, fill rest with backtracking
+             self._generate_room_corridor(num_rooms=5)  # Fewer rooms, more alleys
         else:
             self._generate_bsp()  # Default
         
@@ -112,10 +118,67 @@ class MazeGenerator:
         # Place interactive objects
         self._place_objects()
         
+        # Special Door Logic for Endless: Ensure alleys have privacy
+        if algorithm == "endless":
+            self._place_endless_doors()
+        
         # Ensure solvability
         self._ensure_connectivity()
         
         return self
+        
+    def _place_endless_doors(self):
+        """Place privacy doors at strategic points in corridors for Endless Mode."""
+        from src.core.constants import PRIVACY_DOOR_PLACEMENT_RATE
+        
+        # For 2-tile-wide corridors, we look for:
+        # 1. Floor tiles with exactly 1 wall neighbor (corridor edge) 
+        # 2. Place doors randomly along corridors at intervals
+        
+        placed_doors = set()  # Track door positions to avoid clustering
+        
+        for y in range(2, self.height - 2):
+            for x in range(2, self.width - 2):
+                cell = self.cells[(x, y)]
+                if cell.cell_type != CellType.FLOOR:
+                    continue
+                
+                # Skip if door already placed nearby (within 4 tiles Manhattan distance)
+                too_close = any(abs(x - dx) + abs(y - dy) < 4 for dx, dy in placed_doors)
+                if too_close:
+                    continue
+                
+                # Check wall neighbors
+                left = self.cells.get((x-1, y))
+                right = self.cells.get((x+1, y))
+                top = self.cells.get((x, y-1))
+                bottom = self.cells.get((x, y+1))
+                
+                left_wall = left and left.cell_type == CellType.WALL
+                right_wall = right and right.cell_type == CellType.WALL
+                top_wall = top and top.cell_type == CellType.WALL
+                bottom_wall = bottom and bottom.cell_type == CellType.WALL
+                
+                n_walls = sum([left_wall, right_wall, top_wall, bottom_wall])
+                
+                # Corridor edge: exactly 1 wall neighbor (edge of 2-wide corridor)
+                # Place doors at some corridor positions
+                if n_walls == 1 and random.random() < PRIVACY_DOOR_PLACEMENT_RATE * 0.3:
+                    self.cells[(x, y)].cell_type = CellType.PRIVACY_DOOR
+                    self.cells[(x, y)].is_locked = True
+                    self.door_positions.append((x, y))
+                    placed_doors.add((x, y))
+                
+                # Also place doors at narrow spots (2 walls on adjacent sides - corner-like)
+                elif n_walls == 2 and random.random() < PRIVACY_DOOR_PLACEMENT_RATE * 0.5:
+                    # Check if walls are adjacent (corner) not opposite
+                    is_corner = ((left_wall and top_wall) or (left_wall and bottom_wall) or
+                                 (right_wall and top_wall) or (right_wall and bottom_wall))
+                    if not is_corner:  # Walls are opposite - actual chokepoint
+                        self.cells[(x, y)].cell_type = CellType.PRIVACY_DOOR
+                        self.cells[(x, y)].is_locked = True
+                        self.door_positions.append((x, y))
+                        placed_doors.add((x, y))
     
     def _init_walls(self):
         """Initialize grid with all walls."""
@@ -510,4 +573,4 @@ def create_endless_level(floor_num: int) -> MazeGenerator:
     size_increase = min(15, floor_num * 2)
     size = base_size + size_increase
     
-    return MazeGenerator(size, size).generate("bsp")
+    return MazeGenerator(size, size).generate("endless")

@@ -153,7 +153,7 @@ class Player:
             return
             
         self.health -= amount
-        self.invulnerable_timer = 2.0  # 2 seconds i-frames
+        self.invulnerable_timer = 1.0  # 1 second i-frames
         
         if game.renderer:
             from src.core.constants import COLORS
@@ -348,6 +348,10 @@ class Player:
         if hasattr(game, 'stats_tracker'):
             game.stats_tracker.record_damage()
         
+        # Record damage location for behavior tracker (endless mode)
+        if hasattr(game, 'behavior_tracker') and game.behavior_tracker:
+            game.behavior_tracker.record_damage((int(self.x), int(self.y)))
+        
         if game.renderer:
             from src.core.constants import COLORS
             game.renderer.add_notification("Damage Taken!", COLORS.TRAP)
@@ -360,6 +364,10 @@ class Player:
             # Record death
             if hasattr(game, 'stats_tracker'):
                 game.stats_tracker.record_death()
+            
+            # Record death location for behavior tracker (endless mode)
+            if hasattr(game, 'behavior_tracker') and game.behavior_tracker:
+                game.behavior_tracker.record_death((int(self.x), int(self.y)))
             
             from src.core.constants import GameState
             game.change_state(GameState.GAME_OVER)
@@ -386,7 +394,26 @@ class Player:
             
             from src.core.constants import CellType, COLORS
             
-            # Unlock door if we have keys
+            # Handle Privacy Door - no key required
+            if cell.cell_type == CellType.PRIVACY_DOOR:
+                if cell.is_locked:
+                    # Open the privacy door
+                    cell.is_locked = False
+                    game.level.opened_doors.add((tx, ty))
+                    if game.renderer:
+                        game.renderer.add_notification("Door Opened", COLORS.DOOR_UNLOCKED)
+                    if hasattr(game, 'audio_manager'):
+                        game.audio_manager.play_sound("sfx_ui_select", 0.8)
+                else:
+                    # Close the privacy door (optional - can toggle)
+                    cell.is_locked = True
+                    if (tx, ty) in game.level.opened_doors:
+                        game.level.opened_doors.remove((tx, ty))
+                    if game.renderer:
+                        game.renderer.add_notification("Door Closed", COLORS.DOOR_LOCKED)
+                return
+            
+            # Unlock door if we have keys (regular locked doors)
             if cell.cell_type == CellType.DOOR:
                 if cell.is_locked:
                     if self.keys > 0:
