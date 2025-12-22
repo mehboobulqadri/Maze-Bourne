@@ -1,3 +1,0 @@
-"""
-Maze Bourne - Utility Modules
-"""

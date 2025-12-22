@@ -1,5 +1,0 @@
-# Maze Bourne - Dependencies
-pygame-ce>=2.4.1
-gymnasium>=0.29.1
-stable-baselines3>=2.3.0
-numpy>=1.24.0
