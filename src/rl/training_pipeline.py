@@ -26,6 +26,7 @@ from stable_baselines3.common.env_checker import check_env
 
 from src.rl.gym_env import MazeBourneEnv
 from src.core.constants import RL_CONFIG
+from src.core.logger import get_logger
 
 
 class TrainingCallback(BaseCallback):
@@ -40,7 +41,7 @@ class TrainingCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self.n_calls % self.log_freq == 0:
             if self.verbose > 0:
-                print(f"Step: {self.n_calls}, "
+                get_logger().info(f"Step: {self.n_calls}, "
                       f"Mean reward: {sum(self.episode_rewards[-100:]) / max(len(self.episode_rewards[-100:]), 1):.2f}")
         return True
     
@@ -85,10 +86,10 @@ def train_ppo_agent(
     """
     total_timesteps = total_timesteps or RL_CONFIG["training_timesteps"]
     
-    print(f"[Training] Creating {n_envs} parallel environments...")
+    get_logger().info(f"Creating {n_envs} parallel environments...")
     env = create_training_env(n_envs=n_envs, level_size=level_size)
     
-    print("[Training] Initializing PPO agent...")
+    get_logger().info("Initializing PPO agent...")
     model = PPO(
         "MlpPolicy",
         env,
@@ -114,7 +115,7 @@ def train_ppo_agent(
         name_prefix="ppo_maze"
     )
     
-    print(f"[Training] Starting training for {total_timesteps} steps...")
+    get_logger().info(f"Starting training for {total_timesteps} steps...")
     model.learn(
         total_timesteps=total_timesteps,
         callback=[checkpoint_callback, TrainingCallback()],
@@ -123,7 +124,7 @@ def train_ppo_agent(
     
     # Save final model
     model.save(save_path)
-    print(f"[Training] Model saved to {save_path}")
+    get_logger().info(f"Model saved to {save_path}")
     
     env.close()
     return model
@@ -147,7 +148,7 @@ def evaluate_agent(
     Returns:
         Dictionary with evaluation metrics
     """
-    print(f"[Eval] Loading model from {model_path}")
+    get_logger().info(f"Loading model from {model_path}")
     model = PPO.load(model_path)
     
     env = MazeBourneEnv(
@@ -180,7 +181,7 @@ def evaluate_agent(
         if terminated and info.get("distance_to_exit", float("inf")) < 1:
             wins += 1
         
-        print(f"  Episode {ep + 1}: reward={ep_reward:.2f}, length={ep_length}")
+        get_logger().info(f"  Episode {ep + 1}: reward={ep_reward:.2f}, length={ep_length}")
     
     env.close()
     
@@ -192,23 +193,23 @@ def evaluate_agent(
         "n_episodes": n_episodes
     }
     
-    print(f"\n[Eval] Results:")
-    print(f"  Mean Reward: {results['mean_reward']:.2f} ± {results['std_reward']:.2f}")
-    print(f"  Mean Length: {results['mean_length']:.1f}")
-    print(f"  Win Rate: {results['win_rate'] * 100:.1f}%")
+    get_logger().info(f"\n[Eval] Results:")
+    get_logger().info(f"  Mean Reward: {results['mean_reward']:.2f} ± {results['std_reward']:.2f}")
+    get_logger().info(f"  Mean Length: {results['mean_length']:.1f}")
+    get_logger().info(f"  Win Rate: {results['win_rate'] * 100:.1f}%")
     
     return results
 
 
 def demo_agent(model_path: str, n_episodes: int = 3):
     """Run a visual demo of the trained agent."""
-    print(f"[Demo] Loading model from {model_path}")
+    get_logger().info(f"Loading model from {model_path}")
     model = PPO.load(model_path)
     
     env = MazeBourneEnv(level_size=(20, 20), render_mode="human")
     
     for ep in range(n_episodes):
-        print(f"\n=== Episode {ep + 1} ===")
+        get_logger().info(f"\n=== Episode {ep + 1} ===")
         obs, info = env.reset()
         done = False
         
@@ -218,22 +219,22 @@ def demo_agent(model_path: str, n_episodes: int = 3):
             done = terminated or truncated
             env.render()
         
-        print(f"Episode ended: reward={info.get('total_reward', 0):.2f}")
+        get_logger().info(f"Episode ended: reward={info.get('total_reward', 0):.2f}")
     
     env.close()
 
 
 def verify_environment():
     """Verify the RL environment is compatible with SB3."""
-    print("[Verify] Checking environment compatibility...")
+    get_logger().info("Checking environment compatibility...")
     env = MazeBourneEnv(level_size=(15, 15))
     
     try:
         check_env(env, warn=True)
-        print("[Verify] ✓ Environment passed all checks!")
+        get_logger().info("✓ Environment passed all checks!")
         return True
     except Exception as e:
-        print(f"[Verify] ✗ Environment check failed: {e}")
+        get_logger().error(f"✗ Environment check failed: {e}", exc_info=True)
         return False
     finally:
         env.close()
@@ -241,7 +242,7 @@ def verify_environment():
 
 def quick_train(timesteps: int = 10000):
     """Quick training for testing purposes."""
-    print(f"[Quick Train] Training for {timesteps} steps...")
+    get_logger().info(f"Training for {timesteps} steps...")
     
     env = create_training_env(n_envs=2, level_size=(12, 12))
     
@@ -257,7 +258,7 @@ def quick_train(timesteps: int = 10000):
     model.learn(total_timesteps=timesteps)
     model.save("models/quick_ppo")
     
-    print("[Quick Train] Done! Model saved to models/quick_ppo")
+    get_logger().info("Done! Model saved to models/quick_ppo")
     env.close()
     return model
 

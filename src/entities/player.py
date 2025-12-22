@@ -56,6 +56,17 @@ class Player:
         
         # Movement input buffer
         self._move_input = (0, 0)
+        
+        # Parry
+        self.is_parrying = False
+        self.parry_timer = 0.0
+        self.parry_duration = 0.3  # Active parry window
+        self.parry_cooldown = 0.0
+        self.parry_cooldown_duration = 1.0
+        
+        # Hiding
+        self.is_hidden = False
+        self.current_hiding_spot = None
     
     def update(self, dt: float, game):
         """Update player state."""
@@ -65,10 +76,24 @@ class Player:
         # Update dash
         self._update_dash(dt, game.level)
         
+        # Update parry
+        if self.is_parrying:
+            self.parry_timer -= dt
+            if self.parry_timer <= 0:
+                self.is_parrying = False
+                self.parry_cooldown = self.parry_cooldown_duration
+        
+        if self.parry_cooldown > 0:
+            self.parry_cooldown -= dt
+        
         # Calculate speed
         current_speed = self.speed
         if self.is_stealthed:
             current_speed *= STEALTH_SPEED_MULT
+            
+        # No movement while parrying (optional, but adds tactical weight)
+        if self.is_parrying:
+            current_speed *= 0.2
         
         # Apply movement with AABB collision
         if not self.is_dashing:
@@ -145,28 +170,6 @@ class Player:
                  self.dash_timer = 0
                  break
     
-    # ... (rest of methods) ...
-
-    def take_damage(self, amount: int, game):
-        """Take damage and check for death."""
-        if self.invulnerable_timer > 0:
-            return
-            
-        self.health -= amount
-        self.invulnerable_timer = 1.0  # 1 second i-frames
-        
-        if game.renderer:
-            from src.core.constants import COLORS
-            game.renderer.add_notification("Damage Taken!", COLORS.TRAP)
-            game.renderer.camera.add_shake(10.0)
-        
-        if hasattr(game, 'audio_manager'):
-            game.audio_manager.play_sound("sfx_alert", 1.0)
-            
-        if self.health <= 0:
-            from src.core.constants import GameState
-            game.change_state(GameState.GAME_OVER)
-
     def _check_collision(self, x: float, y: float, level) -> bool:
         """
         Check if the player's bounding box at (x, y) is valid.
@@ -206,6 +209,11 @@ class Player:
         """Process input for movement and abilities."""
         import pygame
         
+        # Disable input if hidden
+        if hasattr(self, 'is_hidden') and self.is_hidden:
+            self._move_input = (0, 0)
+            return
+
         # Movement
         move_x = 0
         move_y = 0
@@ -240,11 +248,17 @@ class Player:
         # Dash
         for key in CONTROLS["dash"]:
             if game.is_key_just_pressed(key):
-                self._try_dash(game)
+                self.dash(game)
                 break
+        
+        # Parry (F key or Right Click)
+        if game.is_key_just_pressed(pygame.K_f) or (hasattr(game, 'mouse_buttons') and game.mouse_buttons[2]):
+             if not self.is_parrying and self.parry_cooldown <= 0:
+                 self.parry(game)
 
     
-    def _try_dash(self, game):
+    
+    def dash(self, game):
         """Attempt to dash."""
         if self.dash_cooldown_timer > 0:
             return
@@ -292,9 +306,11 @@ class Player:
             game.level.collect_key(cx, cy)
             if game.renderer:
                 game.renderer.add_notification("Key Collected!", COLORS.KEY)
+            
             if hasattr(game, 'audio_manager'):
                 game.audio_manager.play_sound("sfx_ui_select", 1.2)
-        
+                
+
         # Check for exit
         if cell.cell_type == CellType.EXIT:
             from src.core.constants import GameState
@@ -335,10 +351,40 @@ class Player:
         # Check for trap damage
         if cell.cell_type == CellType.TRAP:
             self.take_damage(1, game)
+
+    def parry(self, game):
+        """Perform a parry action."""
+        self.is_parrying = True
+        self.parry_timer = self.parry_duration
+        self.parry_cooldown = self.parry_cooldown_duration
+        
+        # Play parry sound
+        if hasattr(game, 'audio_manager') and game.audio_manager:
+            game.audio_manager.play_sound('parry')
+    
+    def enter_hiding_spot(self, hiding_spot):
+        """Enter a hiding spot and become invisible to enemies."""
+        if not self.is_hidden:
+            self.is_hidden = True
+            self.current_hiding_spot = hiding_spot
+            return True
+        return False
+    
+    def exit_hiding_spot(self):
+        """Exit hiding spot and become visible again."""
+        if self.is_hidden:
+            self.is_hidden = False
+            self.current_hiding_spot = None
+            return True
+        return False
     
     def take_damage(self, amount: int, game):
         """Take damage and check for death."""
         if self.invulnerable_timer > 0:
+            return
+        
+        # Can't take damage while hidden
+        if self.is_hidden:
             return
             
         self.health -= amount

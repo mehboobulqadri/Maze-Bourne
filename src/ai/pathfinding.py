@@ -3,6 +3,7 @@ A* Pathfinding Algorithm for Smart Enemy AI
 """
 import heapq
 from typing import List, Optional, Tuple, Set
+from collections import OrderedDict
 from src.utils.grid import GridPos
 from src.levels.maze_generator import CellType
 
@@ -27,13 +28,14 @@ class AStarPathfinder:
     
     def __init__(self, maze: dict):
         self.maze = maze
-        self.cache = {}  # Simple path cache for performance
-        self.max_cache_size = 1000
+        self.cache = OrderedDict()  # LRU cache for performance
+        self.max_cache_size = 500  # Reduced for better memory management
         self.max_iterations = 2000  # Prevent DoS attacks
         self.performance_stats = {
             'total_calls': 0,
             'cache_hits': 0,
-            'timeout_failures': 0
+            'timeout_failures': 0,
+            'cache_evictions': 0
         }
     
     def find_path(self, start: GridPos, goal: GridPos, max_distance: int = 50) -> List[GridPos]:
@@ -50,10 +52,11 @@ class AStarPathfinder:
         """
         self.performance_stats['total_calls'] += 1
         
-        # Check cache first
+        # Check cache first (LRU: move to end on access)
         cache_key = (start, goal)
         if cache_key in self.cache:
             self.performance_stats['cache_hits'] += 1
+            self.cache.move_to_end(cache_key)
             return self.cache[cache_key]
         
         # Validate inputs
@@ -81,9 +84,12 @@ class AStarPathfinder:
             if current.pos == goal:
                 path = self._reconstruct_path(current)
                 
-                # Cache the result
-                if len(self.cache) < self.max_cache_size:
-                    self.cache[cache_key] = path
+                # Cache the result with LRU eviction
+                if len(self.cache) >= self.max_cache_size:
+                    # Remove oldest entry (FIFO in OrderedDict)
+                    self.cache.popitem(last=False)
+                    self.performance_stats['cache_evictions'] += 1
+                self.cache[cache_key] = path
                 
                 return path
             

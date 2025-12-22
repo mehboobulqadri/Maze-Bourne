@@ -1,6 +1,7 @@
 import pygame
 import os
 from src.core.constants import AUDIO_ENABLED, MASTER_VOLUME, SFX_VOLUME, MUSIC_VOLUME
+from src.core.logger import get_logger
 
 class AudioManager:
     def __init__(self):
@@ -11,40 +12,51 @@ class AudioManager:
         self.music_volume = MUSIC_VOLUME
         
         # Initialize mixer if not already done
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+        except Exception as e:
+            get_logger().error(f"Failed to initialize audio mixer: {e}", exc_info=True)
+            self.enabled = False
+            return
             
         self.load_assets()
         
     def load_assets(self):
         """Load all sound files from assets/audio."""
         audio_dir = "assets/audio"
-        if not os.path.exists(audio_dir):
-            print(f"[AudioManager] Audio directory not found: {audio_dir}")
-            return
-            
-        for filename in os.listdir(audio_dir):
-            if filename.endswith(".wav") or filename.endswith(".ogg"):
-                name = os.path.splitext(filename)[0]
-                path = os.path.join(audio_dir, filename)
-                try:
-                    sound = pygame.mixer.Sound(path)
-                    sound.set_volume(self.master_volume * self.sfx_volume)
-                    self.sounds[name] = sound
-                    print(f"[AudioManager] Loaded {name}")
-                except Exception as e:
-                    print(f"[AudioManager] Failed to load {filename}: {e}")
+        try:
+            if not os.path.exists(audio_dir):
+                get_logger().warning(f"Audio directory not found: {audio_dir}")
+                return
+                
+            for filename in os.listdir(audio_dir):
+                if filename.endswith(".wav") or filename.endswith(".ogg"):
+                    name = os.path.splitext(filename)[0]
+                    path = os.path.join(audio_dir, filename)
+                    try:
+                        sound = pygame.mixer.Sound(path)
+                        sound.set_volume(self.master_volume * self.sfx_volume)
+                        self.sounds[name] = sound
+                        get_logger().debug(f"Loaded audio: {name}")
+                    except Exception as e:
+                        get_logger().error(f"Failed to load {filename}: {e}")
+        except OSError as e:
+            get_logger().error(f"Error accessing audio directory {audio_dir}: {e}", exc_info=True)
 
     def play_sound(self, name: str, volume_scale: float = 1.0):
         """Play a sound effect by name."""
         if not self.enabled or name not in self.sounds:
             return
             
-        sound = self.sounds[name]
-        # Adjust volume dynamically based on current settings
-        final_vol = self.master_volume * self.sfx_volume * volume_scale
-        sound.set_volume(final_vol)
-        sound.play()
+        try:
+            sound = self.sounds[name]
+            # Adjust volume dynamically based on current settings
+            final_vol = self.master_volume * self.sfx_volume * volume_scale
+            sound.set_volume(final_vol)
+            sound.play()
+        except Exception as e:
+            get_logger().error(f"Failed to play sound {name}: {e}")
 
     def set_master_volume(self, volume: float):
         self.master_volume = max(0.0, min(1.0, volume))

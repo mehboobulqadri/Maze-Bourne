@@ -6,6 +6,7 @@ Keys, Doors, Cameras, Traps, Hiding Spots, Levers, etc.
 from enum import Enum, auto
 from typing import Optional, Tuple, List, Callable
 from dataclasses import dataclass, field
+from src.core.logger import get_logger
 import math
 import time
 
@@ -54,7 +55,7 @@ class Key(GameObject):
             self.collected = True
             self.is_active = False
             player.keys += 1
-            print(f"[Key] Collected key: {self.key_id}")
+            get_logger().debug(f"Collected key: {self.key_id}")
 
 
 @dataclass 
@@ -82,10 +83,10 @@ class Door(GameObject):
             if game and game.level:
                 game.level.opened_doors.add((int(self.x), int(self.y)))
                 
-            print(f"[Door] Unlocked door: {self.door_id}")
+            get_logger().debug(f"Unlocked door: {self.door_id}")
             return True
         else:
-            print(f"[Door] Need {self.required_keys} key(s) to open!")
+            get_logger().debug(f"Need {self.required_keys} key(s) to open!")
             return False
     
     def unlock(self, game=None):
@@ -96,7 +97,7 @@ class Door(GameObject):
         if game and game.level:
             game.level.opened_doors.add((int(self.x), int(self.y)))
             
-        print(f"[Door] Door {self.door_id} unlocked remotely")
+        get_logger().debug(f"Door {self.door_id} unlocked remotely")
 
 
 @dataclass 
@@ -129,7 +130,7 @@ class PrivacyDoor(GameObject):
                 if cell:
                     cell.is_locked = False
                     
-            print(f"[PrivacyDoor] Opened door {self.door_id}")
+            get_logger().debug(f"Opened privacy door {self.door_id}")
         else:
             # Close the door
             self.is_locked = True
@@ -144,7 +145,7 @@ class PrivacyDoor(GameObject):
                 if cell:
                     cell.is_locked = True
                     
-            print(f"[PrivacyDoor] Closed door {self.door_id}")
+            get_logger().debug(f"Closed privacy door {self.door_id}")
         return True
     
     def update(self, dt: float, game):
@@ -167,7 +168,7 @@ class PrivacyDoor(GameObject):
                             cell = game.level.get_cell(int(self.x), int(self.y))
                             if cell:
                                 cell.is_locked = True
-                        print(f"[PrivacyDoor] Auto-closed door {self.door_id}")
+                        get_logger().debug(f"Auto-closed privacy door {self.door_id}")
 
 
 class Lever(GameObject):
@@ -179,7 +180,7 @@ class Lever(GameObject):
     def on_interact(self, player, game) -> bool:
         """Toggle the lever."""
         self.is_on = not self.is_on
-        print(f"[Lever] Toggled to: {'ON' if self.is_on else 'OFF'}")
+        get_logger().debug(f"Lever toggled to: {'ON' if self.is_on else 'OFF'}")
         
         # Toggle linked objects
         self._toggle_linked_objects(game)
@@ -187,15 +188,17 @@ class Lever(GameObject):
     
     def _toggle_linked_objects(self, game):
         """Toggle all linked objects."""
+        if not hasattr(game, 'game_object_manager') or not game.game_object_manager:
+            return
+        
         for obj_id in self.linked_objects:
-            for obj in game.game_objects:
+            for obj in game.game_object_manager.objects:
                 if hasattr(obj, 'door_id') and obj.door_id == obj_id:
                     if isinstance(obj, Door):
                         if self.is_on:
                             obj.unlock(game)
                         else:
                             obj.is_locked = True
-                            # Remove from opened_doors if relocking
                             if game and game.level and (int(obj.x), int(obj.y)) in game.level.opened_doors:
                                 game.level.opened_doors.remove((int(obj.x), int(obj.y)))
                 elif hasattr(obj, 'camera_id') and obj.camera_id == obj_id:
@@ -308,7 +311,7 @@ class SecurityCamera(GameObject):
             return
         
         self.alert_triggered = True
-        print(f"[Camera] ALARM TRIGGERED! Camera: {self.camera_id}")
+        get_logger().warning(f"ALARM TRIGGERED! Camera: {self.camera_id}")
         
         # Import here to avoid circular imports
         from src.core.constants import EnemyState
@@ -356,7 +359,7 @@ class Trap(GameObject):
         self.is_hidden = False  # Reveal if hidden
         self.last_damage_time = current_time
         
-        print(f"[Trap] Player triggered trap! Damage: {self.damage}")
+        get_logger().debug(f"Player triggered trap! Damage: {self.damage}")
         if hasattr(player, 'take_damage'):
             player.take_damage(self.damage, game)
 
@@ -371,30 +374,40 @@ class HidingSpot(GameObject):
     
     def on_interact(self, player, game) -> bool:
         """Toggle hiding in this spot."""
-        if getattr(player, 'is_hidden', False) and getattr(player, 'hiding_spot', None) == self:
+        if getattr(player, 'is_hidden', False) and getattr(player, 'current_hiding_spot', None) == self:
             # Exit hiding
-            player.is_hidden = False
-            player.hiding_spot = None
-            self.currently_hiding -= 1
-            
-            # Record hiding exit for behavior tracker
-            if hasattr(game, 'behavior_tracker') and game.behavior_tracker:
-                game.behavior_tracker.record_hide((int(self.x), int(self.y)), is_entering=False)
-            
-            print(f"[HidingSpot] Player left hiding spot")
-            return True
+            if player.exit_hiding_spot():
+                self.currently_hiding -= 1
+                
+                # Record hiding exit for behavior tracker
+                if hasattr(game, 'behavior_tracker') and game.behavior_tracker:
+                    game.behavior_tracker.record_hide((int(self.x), int(self.y)), is_entering=False)
+                
+                if game.renderer:
+                    from src.core.constants import COLORS
+                    game.renderer.add_notification("Left Hiding Spot", COLORS.UI_TEXT)
+                
+                get_logger().debug("Player left hiding spot")
+                return True
         elif self.currently_hiding < self.capacity:
             # Enter hiding
-            player.is_hidden = True
-            player.hiding_spot = self
-            self.currently_hiding += 1
-            
-            # Record hiding enter for behavior tracker
-            if hasattr(game, 'behavior_tracker') and game.behavior_tracker:
-                game.behavior_tracker.record_hide((int(self.x), int(self.y)), is_entering=True)
-            
-            print(f"[HidingSpot] Player is now hiding")
-            return True
+            if player.enter_hiding_spot(self):
+                self.currently_hiding += 1
+                
+                # Record hiding enter for behavior tracker
+                if hasattr(game, 'behavior_tracker') and game.behavior_tracker:
+                    game.behavior_tracker.record_hide((int(self.x), int(self.y)), is_entering=True)
+                
+                if game.renderer:
+                    from src.core.constants import COLORS
+                    game.renderer.add_notification("Hiding... Press E to Exit", COLORS.HIDING_SPOT)
+                
+                get_logger().debug("Player is now hiding")
+                return True
+        else:
+            if game.renderer:
+                from src.core.constants import COLORS
+                game.renderer.add_notification("Hiding Spot Full!", COLORS.UI_TEXT_DIM)
         
         return False
 
@@ -421,7 +434,7 @@ class Teleporter(GameObject):
                 player.y = float(obj.y)
                 obj.last_use_time = current_time
                 self.last_use_time = current_time
-                print(f"[Teleporter] Teleported to {self.linked_teleporter_id}")
+                get_logger().debug(f"Teleported to {self.linked_teleporter_id}")
                 break
 
 
@@ -446,7 +459,7 @@ class Collectible(GameObject):
             elif self.collectible_type == "energy":
                 player.energy = min(player.max_energy, player.energy + self.value * 10)
             
-            print(f"[Collectible] Picked up {self.collectible_type}: +{self.value}")
+            get_logger().debug(f"Picked up {self.collectible_type}: +{self.value}")
 
 
 class GameObjectManager:

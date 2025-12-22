@@ -9,6 +9,7 @@ import asyncio
 import threading
 from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field
+from src.core.logger import get_logger
 
 
 @dataclass
@@ -66,7 +67,7 @@ class GeminiProvider(LLMProvider):
             )
             return response.text
         except Exception as e:
-            print(f"[Strategist] Gemini error: {e}")
+            get_logger().error(f"Gemini error: {e}", exc_info=True)
             return ""
 
 
@@ -94,7 +95,7 @@ class OpenAIProvider(LLMProvider):
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"[Strategist] OpenAI error: {e}")
+            get_logger().error(f"OpenAI error: {e}", exc_info=True)
             return ""
 
 
@@ -185,7 +186,7 @@ class EnemyStrategist:
         # Local Ollama (always add as fallback)
         self._providers.append(OllamaProvider())
         
-        print(f"[Strategist] Initialized {len(self._providers)} LLM providers")
+        get_logger().info(f"Initialized {len(self._providers)} LLM providers")
     
     def request_strategy(self, game, enemies: list) -> Optional[str]:
         """
@@ -277,7 +278,7 @@ class EnemyStrategist:
                     if response_text:
                         break
                 except Exception as e:
-                    print(f"[Strategist] Provider error: {e}")
+                    get_logger().error(f"Provider error: {e}", exc_info=True)
             
             # Parse response
             strategy = self._parse_response(request.request_id, response_text)
@@ -339,7 +340,7 @@ TASK: Suggest where enemies should search. Respond in JSON format:
                     confidence=0.7
                 )
         except (json.JSONDecodeError, Exception) as e:
-            print(f"[Strategist] Parse error: {e}")
+            get_logger().error(f"Parse error: {e}", exc_info=True)
         
         return default
     

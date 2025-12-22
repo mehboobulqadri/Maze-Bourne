@@ -6,6 +6,7 @@ Simple ambient/sci-fi background music using pygame mixer
 import pygame
 import numpy as np
 import random
+from src.core.logger import get_logger
 
 
 class ProceduralMusicGenerator:
@@ -98,21 +99,21 @@ class ProceduralMusicGenerator:
     def play(self, volume=0.3, loops=-1):
         """Play the generated track."""
         if not self.current_track:
-            print("[MusicGenerator] Generating ambient track...")
+            get_logger().debug("Generating ambient track...")
             self.current_track = self.generate_ambient_track(duration=45.0, seed=42)
         
         if pygame.mixer.get_init():
             self.current_track.set_volume(volume)
             self.current_track.play(loops=loops)
             self.is_playing = True
-            print("[MusicGenerator] Music started")
+            get_logger().debug("Music started")
     
     def stop(self):
         """Stop playing music."""
         if self.is_playing and self.current_track:
             self.current_track.stop()
             self.is_playing = False
-            print("[MusicGenerator] Music stopped")
+            get_logger().debug("Music stopped")
     
     def set_volume(self, volume):
         """Set music volume (0.0 - 1.0)."""

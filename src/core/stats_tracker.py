@@ -8,6 +8,7 @@ import os
 import time
 from typing import Dict, List, Tuple
 from dataclasses import dataclass, field
+from src.core.logger import get_logger
 
 
 @dataclass
@@ -75,6 +76,7 @@ class StatsTracker:
         """Start tracking a new level attempt."""
         self.current_level_num = level_num
         self.current_level_start_time = time.time()
+        self.current_total_time = 0.0  # Reset timer for new level
         self.current_damage_taken = 0
         self.current_times_spotted = 0
         self.current_time_in_hiding = 0.0
@@ -287,4 +289,4 @@ class StatsTracker:
             }
             
         except Exception as e:
-            print(f"[StatsTracker] Error loading stats: {e}")
+            get_logger().error(f"Error loading stats: {e}", exc_info=True)

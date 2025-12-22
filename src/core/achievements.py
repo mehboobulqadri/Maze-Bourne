@@ -8,6 +8,7 @@ import os
 from typing import Dict, List, Set
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from src.core.logger import get_logger
 
 
 class AchievementType(Enum):
@@ -210,4 +211,4 @@ class AchievementManager:
                     self.achievements[aid].unlocked = ach_data.get("unlocked", False)
                     self.achievements[aid].unlock_time = ach_data.get("unlock_time", 0.0)
         except Exception as e:
-            print(f"[AchievementManager] Error loading achievements: {e}")
+            get_logger().error(f"Error loading achievements: {e}", exc_info=True)

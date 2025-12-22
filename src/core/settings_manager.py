@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Dict, Any
+from src.core.logger import get_logger
 
 SETTINGS_FILE = "settings.json"
 
@@ -34,18 +35,18 @@ class SettingsManager:
                 saved = json.load(f)
                 # Merge with defaults to ensure all keys exist
                 self._recursive_update(self.settings, saved)
-            print("[SettingsManager] Settings loaded")
+            get_logger().info("Settings loaded")
         except Exception as e:
-            print(f"[SettingsManager] Failed to load settings: {e}")
+            get_logger().error(f"Failed to load settings: {e}")
     
     def save(self):
         """Save settings to file."""
         try:
             with open(SETTINGS_FILE, 'w') as f:
                 json.dump(self.settings, f, indent=4)
-            print("[SettingsManager] Settings saved")
+            get_logger().info("Settings saved")
         except Exception as e:
-            print(f"[SettingsManager] Failed to save settings: {e}")
+            get_logger().error(f"Failed to save settings: {e}")
             
     def _recursive_update(self, base: Dict, update: Dict):
         """Update dictionary recursively, preserving structure."""

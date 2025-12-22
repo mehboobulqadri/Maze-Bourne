@@ -2,7 +2,9 @@ import pygame
 import os
 from src.core.constants import *
 from src.levels.level import Level, CellType, Cell
-from src.ui.ui_components import Button
+from src.ui.screens import UIButton
+from src.ui.theme import UITheme
+from src.core.logger import get_logger
 
 class Editor:
     def __init__(self, game):
@@ -35,21 +37,25 @@ class Editor:
         cx = SCREEN_WIDTH - 150
         y = 50
         
+        # Helper to bridge action signature
+        font = self.game.ui_manager.fonts['small']
+        
         # Save Button
-        self.ui_buttons.append(Button(cx, y, 120, 40, "SAVE", self.game.font_small, 
-                                      action=self.save_level, bg_color=COLORS.UI_ENERGY))
+        self.ui_buttons.append(UIButton(cx, y, 120, 40, "SAVE", 
+                                      self.save_level, font))
         y += 50
         
         # Exit Button
-        self.ui_buttons.append(Button(cx, y, 120, 40, "EXIT", self.game.font_small, 
-                                      action=lambda: self.game.change_state(GameState.MENU)))
+        self.ui_buttons.append(UIButton(cx, y, 120, 40, "EXIT", 
+                                      lambda: self.game.change_state(GameState.MENU), font))
         y += 60
         
         # Tool Palette
         for name, tool_type in self.tools:
             # We need to capture tool_type safely in lambda
-            btn = Button(cx, y, 120, 35, name, self.game.font_tiny, 
-                         action=lambda t=tool_type: self.select_tool(t))
+            # Using default argument for binding
+            action = lambda t=tool_type: self.select_tool(t)
+            btn = UIButton(cx, y, 120, 35, name, action, font)
             self.ui_buttons.append(btn)
             y += 40
             
@@ -59,7 +65,7 @@ class Editor:
             self.game.audio_manager.play_sound("sfx_ui_select", 0.6)
 
     def enter(self):
-        print("[Editor] Entering Drag & Drop Editor")
+        get_logger().info("Entering Drag & Drop Editor")
         # Ensure we have a working level to edit
         if not self.level:
             # Load level 1 or create fresh
@@ -87,7 +93,10 @@ class Editor:
                 manager = None
                 
             for btn in self.ui_buttons:
-                btn.update(mouse_pos, mouse_click, manager)
+                # UIButton update takes (pos, click_bool)
+                if btn.update(mouse_pos, mouse_click):
+                     # Action handled inside button
+                     pass
             return
         
         pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_CROSSHAIR)

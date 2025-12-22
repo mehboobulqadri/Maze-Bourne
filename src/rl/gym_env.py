@@ -345,9 +345,10 @@ class MazeBourneEnv(gym.Env):
     
     def _console_render(self):
         """Simple console render."""
-        print(f"Step: {self.steps}, Pos: ({self.player_x:.1f}, {self.player_y:.1f}), "
-              f"HP: {self.player_health}, Keys: {self.player_keys}, "
-              f"Reward: {self.total_reward:.2f}")
+        from src.core.logger import get_logger
+        get_logger().debug(f"Step: {self.steps}, Pos: ({self.player_x:.1f}, {self.player_y:.1f}), "
+                          f"HP: {self.player_health}, Keys: {self.player_keys}, "
+                          f"Reward: {self.total_reward:.2f}")
     
     def _get_rgb_array(self) -> np.ndarray:
         """Get RGB image of game state."""

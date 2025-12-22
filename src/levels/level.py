@@ -7,6 +7,7 @@ from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
 
 from src.core.constants import CellType, EnemyType
+from src.core.logger import get_logger
 from src.levels.maze_generator import MazeGenerator, Cell, create_campaign_level, create_endless_level
 import json
 import os
@@ -41,6 +42,7 @@ class Level:
         self.camera_positions = self.generator.camera_positions
         self.trap_positions = self.generator.trap_positions
         self.hiding_spot_positions = self.generator.hiding_spot_positions
+        self.lever_positions = getattr(self.generator, 'lever_positions', [])
         
         # Level metadata
         self.level_number = 1
@@ -54,8 +56,18 @@ class Level:
     @classmethod
     def load_from_file(cls, path: str) -> 'Level':
         """Load level from JSON file."""
-        with open(path, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            get_logger().error(f"Level file not found: {path}")
+            raise
+        except json.JSONDecodeError as e:
+            get_logger().error(f"Invalid JSON in level file {path}: {e}")
+            raise
+        except Exception as e:
+            get_logger().error(f"Failed to load level from {path}: {e}", exc_info=True)
+            raise
         
         width = data.get("width", 25)
         height = data.get("height", 20)
@@ -87,6 +99,7 @@ class Level:
         generator.camera_positions = [tuple(p) for p in objects.get("camera_positions", [])]
         generator.trap_positions = [tuple(p) for p in objects.get("trap_positions", [])]
         generator.hiding_spot_positions = [tuple(p) for p in objects.get("hiding_spot_positions", [])]
+        generator.lever_positions = [tuple(p) for p in objects.get("lever_positions", [])]
         
         level = cls.__new__(cls)
         level.generator = generator
@@ -103,6 +116,7 @@ class Level:
         level.camera_positions = generator.camera_positions
         level.trap_positions = generator.trap_positions
         level.hiding_spot_positions = generator.hiding_spot_positions
+        level.lever_positions = getattr(generator, 'lever_positions', [])
         
         level.level_number = data.get("level_number", 0)
         level.level_name = data.get("level_name", "Custom Level")
@@ -119,7 +133,7 @@ class Level:
         filename = f"levels/level_{level_number}.json"
         # Check absolute path relative to CWD
         if os.path.exists(filename):
-            print(f"[Level] Loading custom file: {filename}")
+            get_logger().info(f"Loading custom file: {filename}")
             return cls.load_from_file(filename)
             
         generator = create_campaign_level(level_number)
@@ -165,6 +179,15 @@ class Level:
         level.camera_positions = generator.camera_positions
         level.trap_positions = generator.trap_positions
         level.hiding_spot_positions = generator.hiding_spot_positions
+        level.hiding_spot_positions = generator.hiding_spot_positions
+        level.boss_button_positions = generator.boss_button_positions
+        
+        # Determine boss spawn (center of arena)
+        # MazeGenerator._generate_boss_arena sets spawn_point to center
+        # But for boss level, player spawns at entrance, boss at center/end?
+        # Let's assume generator.boss_spawn_pos exists or we use center
+        level.boss_spawn_pos = getattr(generator, 'boss_spawn_pos', (generator.width/2, generator.height/2))
+        
         level.level_number = floor_number
         level.level_name = f"Floor {floor_number}"
         level.is_completed = False
@@ -270,13 +293,20 @@ class Level:
     
     def save_to_file(self, path: str):
         """Save level to JSON file."""
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
-        
-        data = self.to_dict()
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
-        print(f"[Level] Saved to {path}")
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+            
+            data = self.to_dict()
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+            get_logger().info(f"Saved to {path}")
+        except OSError as e:
+            get_logger().error(f"Failed to create directory or write file {path}: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            get_logger().error(f"Failed to save level to {path}: {e}", exc_info=True)
+            raise
     
     def __str__(self) -> str:
         """String representation for debugging."""

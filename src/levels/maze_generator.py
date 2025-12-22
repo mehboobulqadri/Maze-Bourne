@@ -12,6 +12,7 @@ from src.core.constants import (
     CellType, LEVEL_SIZES, 
     MIN_ROOMS, MAX_ROOMS, MIN_ROOM_SIZE, MAX_ROOM_SIZE, CORRIDOR_WIDTH
 )
+from src.core.logger import get_logger
 
 
 @dataclass
@@ -93,11 +94,19 @@ class MazeGenerator:
         self.camera_positions: List[Tuple[int, int]] = []
         self.trap_positions: List[Tuple[int, int]] = []
         self.hiding_spot_positions: List[Tuple[int, int]] = []
+        self.lever_positions: List[Tuple[int, int]] = []
+        self.lever_positions: List[Tuple[int, int]] = []
+        self.boss_button_positions: List[Tuple[int, int]] = []
+        self.boss_spawn_pos: Tuple[int, int] = (0, 0)
     
     def generate(self, algorithm: str = "bsp") -> 'MazeGenerator':
         """Generate a maze using the specified algorithm."""
         # Initialize all cells as walls
         self._init_walls()
+
+        if algorithm == "boss_arena":
+            self._generate_boss_arena()
+            return self
         
         if algorithm == "bsp":
             self._generate_bsp()
@@ -541,11 +550,49 @@ class MazeGenerator:
         cell = self.get_cell(x, y)
         return cell is not None and cell.is_walkable()
 
+    def _generate_boss_arena(self):
+        """Generate a large open arena for boss battles."""
+        # Ensure room is large enough
+        w, h = self.width, self.height
+        
+        # Center room (leave 2 tile border)
+        for y in range(2, h - 2):
+            for x in range(2, w - 2):
+                self.cells[(x, y)].cell_type = CellType.FLOOR
+        
+        # Spawn point (bottom center)
+        self.spawn_point = (w // 2, h - 3)
+        
+        # Boss buttons in 4 corners (inset by 3)
+        button_coords = [
+            (3, 3), (w - 4, 3), 
+            (3, h - 4), (w - 4, h - 4)
+        ]
+        
+        for bx, by in button_coords:
+            self.boss_button_positions.append((bx, by))
+            # Optional: Place a pillar/wall near the button for cover
+            self.cells[(bx + 1, by + 1)].cell_type = CellType.WALL
+        
+        # Exit (Top center, initially locked?)
+        # For now, just place exit
+        self.exit_point = (w // 2, 2)
+        self.exit_point = (w // 2, 2)
+        self.cells[self.exit_point].cell_type = CellType.EXIT
+        
+        # Boss spawns in center
+        self.boss_spawn_pos = (w // 2, h // 2)
+        
+        get_logger().debug(f"Generated Boss Arena ({w}x{h})")
+
 
 def create_level(width: int, height: int, algorithm: str = "bsp", 
                  seed: Optional[int] = None) -> MazeGenerator:
     """Factory function to create a new level."""
     return MazeGenerator(width, height, seed).generate(algorithm)
+
+    
+
 
 
 def create_campaign_level(level_num: int) -> MazeGenerator:
@@ -569,6 +616,11 @@ def create_campaign_level(level_num: int) -> MazeGenerator:
 
 def create_endless_level(floor_num: int) -> MazeGenerator:
     """Create an endless mode level."""
+    # Boss level every 10 floors
+    if floor_num > 0 and floor_num % 10 == 0:
+        size = 20  # Fixed arena size
+        return MazeGenerator(size, size).generate("boss_arena")
+    
     base_size = 25
     size_increase = min(15, floor_num * 2)
     size = base_size + size_increase

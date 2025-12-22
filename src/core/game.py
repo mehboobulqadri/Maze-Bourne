@@ -16,7 +16,9 @@ from src.core.constants import (
     GameState, COLORS, DEBUG_MODE, SHOW_FPS
 )
 from src.core.editor import Editor
-from src.ui.ui_components import Button, Slider
+from src.core.logger import get_logger
+from src.entities.boss import Boss, BossButton, create_boss, should_spawn_boss
+
 
 
 class Game:
@@ -112,8 +114,7 @@ class Game:
         self.font_small = pygame.font.Font(None, 36)
         self.font_tiny = pygame.font.Font(None, 28)
         
-        # Editor (needs fonts)
-        self.editor = Editor(self)
+
         
         # Entities
         self.enemies = []
@@ -130,9 +131,46 @@ class Game:
         # LLM Strategist (for endless mode enemy coordination)
         self.strategist = None  # Initialized in endless mode
         
+        # Audio
+        from src.core.audio_manager import AudioManager
+        self.audio_manager = AudioManager()
+        self.audio_manager.set_master_volume(self.settings_manager.get("audio", "master_volume"))
+        self.audio_manager.set_sfx_volume(self.settings_manager.get("audio", "sfx_volume"))
+        
+        # UI System
+        from src.ui.ui_manager import UIManager
+        from src.ui.screens import MainMenuScreen, HUDScreen, PauseScreen, GameOverScreen, SettingsScreen, CreditsScreen
+        
+        self.ui_manager = UIManager(self)
+        self.ui_manager.register_screen("menu", MainMenuScreen(self.ui_manager))
+        self.ui_manager.register_screen("hud", HUDScreen(self.ui_manager))
+        self.ui_manager.register_screen("pause", PauseScreen(self.ui_manager))
+        self.ui_manager.register_screen("game_over", GameOverScreen(self.ui_manager))
+        self.ui_manager.register_screen("settings", SettingsScreen(self.ui_manager))
+        self.ui_manager.register_screen("credits", CreditsScreen(self.ui_manager))
+        self.ui_manager.switch_screen("menu")
+        
+        # Editor (needs fonts, ui, audio)
+        self.editor = Editor(self)
+        
+        # RL / AI initialization (deferred to endless)
+        self.previous_frame_time = time.time()
+        self.dt = 0.0
+        
+        # Boss components
+        self.current_boss = None
+        self.boss_buttons = []
+
+        # Start background music
+        self.audio_manager.play_music("music_menu")
+        
         # Register default state handlers
         self._setup_default_handlers()
         
+        # Boss Battle System
+        self.current_boss = None
+        self.boss_buttons = []
+
         # Initialize initial state
         if self.state in self.state_handlers:
             handler = self.state_handlers[self.state]
@@ -299,41 +337,77 @@ class Game:
             "exit": exit or (lambda: None),
         }
     
+    def unpause(self):
+        """Helper to resume game."""
+        self.ui_manager.clear_overlay()
+        self.change_state(GameState.PLAYING)
+        
+    def quit_to_menu(self):
+        """Helper to return to menu."""
+        self.ui_manager.clear_overlay()
+        self.ui_manager.switch_screen("menu")
+        self.change_state(GameState.MENU)
+
     def change_state(self, new_state: GameState):
-        """Change the current game state."""
-        if new_state == self.state:
+        """Transition to a new game state."""
+        if self.state == new_state:
             return
             
         # Exit current state
         if self.state in self.state_handlers:
             self.state_handlers[self.state]["exit"]()
-        
-        self.previous_state = self.state
+            
+        self.last_state = self.state
         self.state = new_state
+        get_logger().info(f"State changed: {self.last_state.name} -> {self.state.name}")
         
+        # UIManager Logic based on state
+        if new_state == GameState.PAUSED:
+            self.ui_manager.set_overlay("pause")
+        elif new_state == GameState.PLAYING:
+            self.ui_manager.switch_screen("hud")
+            self.ui_manager.clear_overlay()
+        elif new_state == GameState.GAME_OVER:
+            # Collect stats
+            stats = {"floor": self.current_level_num} # TODO: Add more stats from tracker
+            self.ui_manager.switch_screen("game_over", victory=False, stats=stats)
+        elif new_state == GameState.VICTORY:
+            stats = {"floor": self.current_level_num, "score": 999}
+            self.ui_manager.switch_screen("game_over", victory=True, stats=stats)
+        elif new_state == GameState.MENU:
+            self.ui_manager.switch_screen("menu")
+        elif new_state == GameState.SETTINGS:
+            self.ui_manager.switch_screen("settings")
+        elif new_state == GameState.CREDITS:
+            self.ui_manager.switch_screen("credits")
+            
         # Enter new state
         if self.state in self.state_handlers:
             self.state_handlers[self.state]["enter"]()
     
-    def _process_events(self):
-        """Process pygame events."""
-        # Clear just pressed/released keys
-        self.keys_just_pressed.clear()
-        self.keys_just_released.clear()
-        
+    def _handle_events(self):
+        """Process input events."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
-            
-            elif event.type == pygame.KEYDOWN:
-                self.keys_pressed.add(event.key)
-                self.keys_just_pressed.add(event.key)
                 
-                # Global keys
+            # Global Key Handlers
+            if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F3:
-                    self.debug_mode = not self.debug_mode
-                if event.key == pygame.K_F4:
-                    self.show_fps = not self.show_fps
+                    # Toggle Debug
+                    import src.core.constants as c
+                    c.DEBUG_MODE = not c.DEBUG_MODE
+                    
+            # UI Manager Routing
+            # If UI consumes event, don't pass to game logic
+            if self.ui_manager.handle_event(event):
+                continue
+                
+            # If not consumed, normal game input handling (state specific if needed)
+            if self.state == GameState.PLAYING:
+                 # Interaction handled in update via key polling usually, 
+                 # but if we had click-to-move, it would be here.
+                 pass
             
             elif event.type == pygame.KEYUP:
                 self.keys_pressed.discard(event.key)
@@ -430,15 +504,15 @@ class Game:
                    action=lambda: self._menu_action("endless")),
             Button(cx - btn_w//2, cy - 20 + gap*2, btn_w, btn_h, "SETTINGS", self.font_medium, 
                    action=lambda: self._menu_action("settings")),
-            Button(cx - btn_w//2, cy - 20 + gap*2, btn_w, btn_h, "ACHIEVEMENTS", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*3, btn_w, btn_h, "ACHIEVEMENTS", self.font_medium, 
                    action=lambda: self._menu_action("achievements")),
-            Button(cx - btn_w//2, cy - 20 + gap*3, btn_w, btn_h, "EDITOR", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*4, btn_w, btn_h, "EDITOR", self.font_medium, 
                    action=lambda: self._menu_action("editor")),
-            Button(cx - btn_w//2, cy - 20 + gap*4, btn_w, btn_h, "HELP", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*5, btn_w, btn_h, "HELP", self.font_medium, 
                    action=lambda: self._menu_action("help")),
-            Button(cx - btn_w//2, cy - 20 + gap*5, btn_w, btn_h, "CREDITS", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*6, btn_w, btn_h, "CREDITS", self.font_medium, 
                    action=lambda: self._menu_action("credits")),
-            Button(cx - btn_w//2, cy - 20 + gap*6, btn_w, btn_h, "QUIT", self.font_medium, 
+            Button(cx - btn_w//2, cy - 20 + gap*7, btn_w, btn_h, "QUIT", self.font_medium, 
                    action=lambda: self._menu_action("quit")),
         ]
 
@@ -557,124 +631,22 @@ class Game:
         self.max_scroll = total_h
     def _menu_update(self, dt: float):
         """Update menu state."""
-        # Pan Camera
-        if self.renderer and self.renderer.camera:
-            self.renderer.camera.x += 20 * dt
-            self.renderer.update(dt) # Update particles/effects
-            
-        # Get mouse position in window coordinates and convert to game surface coordinates
-        mouse_pos = pygame.mouse.get_pos()
-        mouse_click = pygame.mouse.get_pressed()[0]
-        
-        for btn in self.menu_buttons:
-            if btn.update(mouse_pos, mouse_click, self.audio_manager):
-                # Action triggered
-                pass
+        self.ui_manager.update(dt)
     
     def _menu_render(self):
         """Render menu state."""
-        # Draw background level
-        self.screen.fill(COLORS.BACKGROUND)
-        if self.renderer and self.level:
-            self.renderer.render(self.screen)
-        
-        # Dark Overlay
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 150))
-        self.screen.blit(overlay, (0, 0))
-        
-        # Title
-        title = self.font_large.render("MAZE BOURNE", True, COLORS.PLAYER)
-        # Pulse title
-        scale = 1.0 + math.sin(time.time() * 2) * 0.05
-        w, h = title.get_size()
-        scaled_title = pygame.transform.smoothscale(title, (int(w*scale), int(h*scale)))
-        title_rect = scaled_title.get_rect(center=(SCREEN_WIDTH // 2, 150))
-        self.screen.blit(scaled_title, title_rect)
-        
-        # Buttons
-        for btn in self.menu_buttons:
-            btn.draw(self.screen)
+        self.ui_manager.draw(self.screen)
             
     def _settings_enter(self):
         """Setup settings UI."""
-        # Imports handled globally
-        
-        cx = SCREEN_WIDTH // 2
-        cy = SCREEN_HEIGHT // 2
-        
-        self.settings_ui_elements = []
-        
-        # Sliders
-        # Master Volume
-        val = self.settings_manager.get("audio", "master_volume") or 0.7
-        self.slider_master = Slider(cx - 150, 200, 300, 20, 0.0, 1.0, val, "Master Volume", self.font_small)
-        self.settings_ui_elements.append(self.slider_master)
-        
-        # SFX Volume
-        val = self.settings_manager.get("audio", "sfx_volume") or 0.8
-        self.slider_sfx = Slider(cx - 150, 280, 300, 20, 0.0, 1.0, val, "SFX Volume", self.font_small)
-        self.settings_ui_elements.append(self.slider_sfx)
-
-        # Buttons for Difficulty
-        self.settings_ui_elements.append(Button(cx - 150, 350, 300, 40, "Difficulty: " + str(self.settings_manager.get("gameplay", "difficulty")).upper(), self.font_small, 
-                   action=lambda: self._toggle_difficulty()))
-                   
-        # Back Button
-        self.settings_ui_elements.append(Button(cx - 120, 560, 240, 55, "BACK", self.font_medium, 
-                   action=lambda: self.change_state(GameState.MENU)))
-
-    def _toggle_difficulty(self):
-        diffs = ["easy", "normal", "hard"]
-        curr = self.settings_manager.get("gameplay", "difficulty")
-        try:
-            next_idx = (diffs.index(curr) + 1) % len(diffs)
-        except:
-            next_idx = 0
-        new_diff = diffs[next_idx]
-        self.settings_manager.set("gameplay", "difficulty", new_diff)
-        
-        # Update button text
-        for el in self.settings_ui_elements:
-            if isinstance(el, Button) and "Difficulty" in el.text:
-                # Need to re-render text
-                el.text = "Difficulty: " + new_diff.upper()
-                el.text_surf = el.font.render(el.text, True, el.text_color)
-                el.text_rect = el.text_surf.get_rect(center=el.rect.center)
-                break
+        # UIManager handles this now via change_state -> switch_screen
+        pass
 
     def _settings_update(self, dt: float):
-        mouse_pos = pygame.mouse.get_pos()
-        mouse_click = pygame.mouse.get_pressed()[0]
-        mouse_down = pygame.mouse.get_pressed()[0]
-        
-        # Handle sliders
-        new_master = self.slider_master.update(mouse_pos, mouse_down)
-        if new_master != self.settings_manager.get("audio", "master_volume"):
-            self.settings_manager.set("audio", "master_volume", new_master)
-            self.audio_manager.set_master_volume(new_master)
-            
-        new_sfx = self.slider_sfx.update(mouse_pos, mouse_down)
-        if new_sfx != self.settings_manager.get("audio", "sfx_volume"):
-            self.settings_manager.set("audio", "sfx_volume", new_sfx)
-            self.audio_manager.set_sfx_volume(new_sfx)
-            
-        # Handle buttons
-        for el in self.settings_ui_elements:
-            if hasattr(el, 'update') and not isinstance(el, Slider): # Sliders handled above
-                 el.update(mouse_pos, mouse_click, self.audio_manager)
-
-        if self.is_key_just_pressed(pygame.K_ESCAPE):
-            self.change_state(GameState.MENU)
+        self.ui_manager.update(dt)
 
     def _settings_render(self):
-        self.screen.fill(COLORS.BACKGROUND)
-        
-        title = self.font_medium.render("SETTINGS", True, COLORS.UI_TEXT)
-        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 80)))
-        
-        for el in self.settings_ui_elements:
-            el.draw(self.screen)
+        self.ui_manager.draw(self.screen)
     
     # =========================================================================
     # Achievements State
@@ -820,6 +792,14 @@ class Game:
         self.reset_level_requested = True
         self.change_state(GameState.PLAYING)
     
+    def _game_over_update(self, dt: float):
+        self.ui_manager.update(dt)
+        
+    def _game_over_render(self):
+        if self.renderer:
+            self.renderer.render(self.screen)
+        self.ui_manager.draw(self.screen)
+            
     def _level_select_update(self, dt: float):
         """Handle level selection input."""
         mouse_pos = pygame.mouse.get_pos()
@@ -913,27 +893,47 @@ class Game:
         )
         
         if self.game_mode == "endless":
-            print(f"[Maze Bourne] Loading Endless Floor {self.current_level_num}...")
+            get_logger().info(f"Loading Endless Floor {self.current_level_num}...")
             self.level = Level.from_endless(self.current_level_num)
             
-            # Initialize behavior tracker for endless mode (or keep existing one)
+            # Initialize behavior tracker
             from src.ai.player_tracker import PlayerBehaviorTracker
             if self.behavior_tracker is None:
                 self.behavior_tracker = PlayerBehaviorTracker()
             else:
-                # Reset per-floor data but keep cumulative stats
                 self.behavior_tracker.reset_for_new_floor()
             
-            # Initialize LLM strategist for endless mode
+            # Initialize LLM strategist
             from src.ai.strategist import EnemyStrategist
             if not hasattr(self, 'strategist') or self.strategist is None:
                 self.strategist = EnemyStrategist(self.settings_manager)
+            
+            # Boss Battle Check
+            self.current_boss = None
+            self.boss_buttons = []
+            if self.current_level_num > 0 and self.current_level_num % 10 == 0:
+                get_logger().info(f"BOSS BATTLE - Floor {self.current_level_num}")
+                from src.entities.boss import create_boss, BossButton
+                
+                # Create boss at center
+                center_x = self.level.width / 2.0
+                center_y = self.level.height / 2.0
+                self.current_boss = create_boss(self.current_level_num, (center_x, center_y))
+                
+                # Create buttons
+                if hasattr(self.level, 'boss_button_positions'):
+                    for i, (bx, by) in enumerate(self.level.boss_button_positions):
+                        btn = BossButton(bx, by, f"btn_{i}")
+                        self.boss_buttons.append(btn)
+                        self.game_object_manager.add(btn)
         else:
             # Create campaign level
-            print(f"[Maze Bourne] Loading Campaign Level {self.current_level_num}...")
+            get_logger().info(f"Loading Campaign Level {self.current_level_num}...")
             self.level = Level.from_campaign(self.current_level_num)
+            self.current_boss = None
+            self.boss_buttons = []
         
-        # Create player at spawn point with difficulty-based health
+        # Create player at spawn point
         spawn_x, spawn_y = self.level.spawn_point
         difficulty = self.settings_manager.get("gameplay", "difficulty")
         
@@ -1015,10 +1015,20 @@ class Game:
             )
             self.game_object_manager.add(hiding_spot)
         
-        print(f"[Maze Bourne] Level initialized: {self.level.width}x{self.level.height}")
-        print(f"[Maze Bourne] Player spawned at: ({spawn_x}, {spawn_y})")
-        print(f"[Maze Bourne] Spawned {len(self.enemies)} enemies")
-        print(f"[Maze Bourne] Spawned {len(self.game_object_manager.objects)} game objects")
+        # Spawn levers
+        from src.entities.game_objects import Lever
+        for i, pos in enumerate(getattr(self.level, 'lever_positions', [])):
+            lever = Lever(
+                x=pos[0], y=pos[1],
+                is_on=False,
+                linked_objects=[]
+            )
+            self.game_object_manager.add(lever)
+        
+        get_logger().info(f"Level initialized: {self.level.width}x{self.level.height}")
+        get_logger().info(f"Player spawned at: ({spawn_x}, {spawn_y})")
+        get_logger().info(f"Spawned {len(self.enemies)} enemies")
+        get_logger().info(f"Spawned {len(self.game_object_manager.objects)} game objects")
         
         # Start level timer
         self.stats_tracker.start_level(self.current_level_num)
@@ -1027,6 +1037,18 @@ class Game:
         if hasattr(self, 'music_generator') and not self.music_generator.is_playing:
             music_volume = self.settings_manager.get("audio", "music_volume") or 0.3
             self.music_generator.play(volume=music_volume)
+    
+    def _advance_to_next_level(self):
+        """Advance to the next level after boss defeat or exit reached."""
+        self.current_level_num += 1
+        self.reset_level_requested = True
+        self.level = None
+        self.current_boss = None
+        self.boss_buttons = []
+        
+        get_logger().info(f"Advancing to level {self.current_level_num}")
+        
+        self._playing_enter()
     
     def _playing_update(self, dt: float):
         """Update playing state."""
@@ -1072,6 +1094,54 @@ class Game:
         for enemy in self.enemies:
             enemy.update(dt, self)
         
+        # LLM Strategist for Endless Mode (periodic strategy requests)
+        if self.game_mode == "endless" and hasattr(self, 'strategist') and self.strategist:
+            # Check if any enemies are searching
+            from src.core.constants import EnemyState
+            searching_enemies = [e for e in self.enemies if e.state == EnemyState.SEARCH]
+            
+            if searching_enemies:
+                # Request strategy periodically
+                if not hasattr(self, '_strategist_request_id'):
+                    self._strategist_request_id = self.strategist.request_strategy(self, self.enemies)
+                elif self._strategist_request_id:
+                    # Check for response
+                    response = self.strategist.get_response(self._strategist_request_id)
+                    if response:
+                        # Apply strategy to searching enemies
+                        get_logger().debug(f"Strategist response: {response.reasoning}")
+                        self._strategist_request_id = None
+            else:
+                # Reset when no enemies searching
+                self._strategist_request_id = None
+        
+        # Update Boss
+        if self.current_boss:
+            self.current_boss.update(dt, self)
+            
+            # Check for defeat
+            if self.current_boss.is_defeated:
+                # Delay before transitioning to next level
+                if not hasattr(self, '_boss_defeat_timer'):
+                    self._boss_defeat_timer = 3.0
+                    get_logger().info("Boss defeated! Transitioning to next level...")
+                else:
+                    self._boss_defeat_timer -= dt
+                    if self._boss_defeat_timer <= 0:
+                        delattr(self, '_boss_defeat_timer')
+                        self._advance_to_next_level()
+        
+        # Update Boss Buttons
+        for btn in self.boss_buttons:
+            btn.update(dt)
+            # Simple collision interaction (if player walks on it? No, use 'E' interact)
+            # We'll rely on player.interact() calling btn.on_interact()
+            # BUT player.interact only checks cells.
+            # Buttons are logically on cells.
+            # We need to bridge Player.interact -> BossButton
+        
+        # Update game objects
+        
         # Update game objects
         if self.game_object_manager:
             self.game_object_manager.update(dt, self)
@@ -1083,7 +1153,20 @@ class Game:
     def _playing_render(self):
         """Render playing state."""
         if self.renderer:
+            # Main render (World)
             self.renderer.render(self.screen)
+            
+            # Boss specific rendering (World Space)
+            if self.current_boss and self.current_boss.is_alive:
+                self.renderer.render_boss(self.current_boss, self.renderer.camera)
+            
+            # Boss Buttons (World Space)
+            for btn in self.boss_buttons:
+                self.renderer.render_boss_button(btn, self.renderer.camera)
+                
+            # UI Overlay (HUD, Boss Bar, etc)
+            self.ui_manager.draw(self.screen)
+            
         else:
             # Placeholder when renderer not initialized
             text = self.font_medium.render("Game View - Renderer Loading...", True, COLORS.UI_TEXT)
@@ -1181,46 +1264,10 @@ class Game:
         self.credits_offset = 0.0
 
     def _credits_update(self, dt: float):
-        self.credits_offset += 30 * dt
-        mouse_pos = pygame.mouse.get_pos()
-        mouse_click = pygame.mouse.get_pressed()[0]
-        for btn in self.credits_buttons:
-             btn.update(mouse_pos, mouse_click, self.audio_manager)
-        if self.is_key_just_pressed(pygame.K_ESCAPE):
-             self.change_state(GameState.MENU)
+        self.ui_manager.update(dt)
 
     def _credits_render(self):
-        self.screen.fill(COLORS.VOID)
-        
-        lines = [
-            "MAZE BOURNE", "", "Created by", "Antigravity Agent", "",
-            "Tools Used", "Pygame Community Edition", "Python 3", "",
-            "Special Thanks", "Google DeepMind", "The User", "",
-            "Assets", "Procedural Audio Generator", "Geometric Graphics Engine", "",
-            "Thank you for playing!"
-        ]
-        
-        cx = SCREEN_WIDTH // 2
-        start_y = SCREEN_HEIGHT - 100 - self.credits_offset
-        
-        for line in lines:
-            if start_y > SCREEN_HEIGHT:
-                 start_y += 40
-                 continue
-            if start_y < -50:
-                 pass 
-            
-            color = COLORS.PLAYER if line == "MAZE BOURNE" else COLORS.UI_TEXT
-            font = self.font_large if line == "MAZE BOURNE" else self.font_medium
-            
-            surf = font.render(line, True, color)
-            self.screen.blit(surf, surf.get_rect(center=(cx, start_y)))
-            start_y += 50
-            
-        if start_y < -500: self.credits_offset = -SCREEN_HEIGHT
-        
-        for btn in self.credits_buttons:
-            btn.draw(self.screen)
+        self.ui_manager.draw(self.screen)
             
     def _paused_enter(self):
         # Ensure buttons are created if they don't exist
@@ -1250,35 +1297,16 @@ class Game:
         self.change_state(GameState.PLAYING)
 
     def _paused_update(self, dt: float):
-        mouse_pos = pygame.mouse.get_pos()
-        mouse_click = pygame.mouse.get_pressed()[0]
+        self.ui_manager.update(dt)
         
-        # Check if buttons exist (safety)
-        if not hasattr(self, 'pause_buttons'):
-            self._paused_enter()
-            
-        for btn in self.pause_buttons:
-            btn.update(mouse_pos, mouse_click, self.audio_manager)
-            
-        if self.is_key_just_pressed(pygame.K_ESCAPE):
-             self.change_state(GameState.PLAYING)
-
     def _paused_render(self):
-        # Render game underneath
-        if self.renderer:
-            self.renderer.render(self.screen)
+        self.renderer.render(self.screen) # Draw underlying game
+        self.ui_manager.draw(self.screen) # Draw Pause Overlay (handled by set_overlay ideally, or just switch_screen logic)
         
-        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
-        overlay.fill((0, 0, 0))
-        overlay.set_alpha(150)
-        self.screen.blit(overlay, (0, 0))
-        
-        title = self.font_large.render("PAUSED", True, COLORS.UI_TEXT)
-        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 100)))
-        
-        if hasattr(self, 'pause_buttons'):
-            for btn in self.pause_buttons:
-                btn.draw(self.screen)
+        # NOTE: If using switch_screen("pause"), the game won't render behind it unless PauseScreen handles it?
+        # My UIManager has 'active_screen' and 'overlay_screen'.
+        # Best approach: GameState.PAUSED sets overlay 'pause'.
+        pass
     
     def _game_over_update(self, dt: float):
         """Update game over state."""

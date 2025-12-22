@@ -98,37 +98,6 @@ class Enemy:
         self.checked_hiding_spots = set()
         self.assigned_search_zone = None
     
-    # ... (existing methods)
-
-    def update(self, dt: float, game):
-        """Update enemy state."""
-        if not self.is_alive:
-            return
-        
-        player = game.player
-        level = game.level
-        
-         # Timers
-        self.move_timer += dt
-        self.state_timer += dt
-        self.attack_cooldown = max(0, self.attack_cooldown - dt)
-        self.path_update_timer += dt
-        
-        # Get dynamic settings
-        speed_mult = 1.0
-        vision_mult = 1.0
-        smartness = 1.0
-        
-        if hasattr(game, 'settings_manager'):
-            speed_mult = game.settings_manager.get("gameplay", "enemy_speed_multiplier") or 1.0
-            smartness = game.settings_manager.get("gameplay", "enemy_smartness") or 1.0
-            
-        # Apply multipliers
-        self.current_speed = self.speed * speed_mult
-        self.current_vision_range = self.vision_range * vision_mult
-        self.current_smartness = smartness
-
-    
     def _generate_patrol_route(self):
         """Generate patrol waypoints around spawn position."""
         # This will be called again in update once we have level access
@@ -528,6 +497,19 @@ class Enemy:
         # Get game reference for adaptive behaviors
         game = getattr(self, '_game', None)
         
+        # Check nearby hiding spots first if smart enough
+        smartness = getattr(self, 'current_smartness', 1.0)
+        if game and smartness >= 1.0:
+            hiding_spot_target = self._get_nearby_hiding_spot_to_check(game)
+            if hiding_spot_target:
+                if self.pos.distance_to(hiding_spot_target) > 0.5:
+                    self._update_pathfinding(hiding_spot_target, use_pathfinding=True)
+                    if self.current_path:
+                        self._move_along_path(level)
+                    else:
+                        self._move_toward(hiding_spot_target, level)
+                    return
+        
         # In endless mode, use adaptive search if available
         if game and game.game_mode == "endless" and hasattr(game, 'behavior_tracker') and game.behavior_tracker:
             adaptive_target = self._get_adaptive_search_target(game)
@@ -545,7 +527,6 @@ class Enemy:
         if self.last_known_player_pos:
             if self.pos.distance_to(self.last_known_player_pos) > 0.5:
                 # Use pathfinding for search if smart enough
-                smartness = getattr(self, 'current_smartness', 1.0)
                 use_pathfinding = (self.enemy_type == EnemyType.TRACKER or smartness >= 1.5)
                 
                 if use_pathfinding and self.pathfinder:
@@ -562,6 +543,38 @@ class Enemy:
                     self._change_state(EnemyState.RETURN)
         else:
             self._change_state(EnemyState.RETURN)
+    
+    def _get_nearby_hiding_spot_to_check(self, game) -> Optional[GridPos]:
+        """
+        Get nearby hiding spot to check during search.
+        Returns position of unchecked hiding spot within search radius.
+        """
+        if not hasattr(game, 'game_objects') or not game.game_objects:
+            return None
+        
+        from src.entities.game_objects import HidingSpot
+        search_radius = 10.0
+        nearby_spots = []
+        
+        for obj in game.game_objects.objects:
+            if isinstance(obj, HidingSpot) and obj.is_active:
+                spot_pos = GridPos(obj.x, obj.y)
+                distance = self.pos.distance_to(spot_pos)
+                
+                if distance <= search_radius:
+                    spot_tuple = (int(obj.x), int(obj.y))
+                    if spot_tuple not in self.checked_hiding_spots:
+                        nearby_spots.append((spot_pos, distance))
+        
+        if nearby_spots:
+            nearby_spots.sort(key=lambda x: x[1])
+            closest_spot = nearby_spots[0][0]
+            self.checked_hiding_spots.add((int(closest_spot.x), int(closest_spot.y)))
+            from src.core.logger import get_logger
+            get_logger().debug(f"Enemy checking hiding spot at ({closest_spot.x}, {closest_spot.y})")
+            return closest_spot
+        
+        return None
     
     def _get_adaptive_search_target(self, game):
         """
@@ -611,6 +624,7 @@ class Enemy:
             # Lost player for too long
             if self.lost_player_timer > ENEMY_CHASE_TIMEOUT:
                 self._change_state(EnemyState.SEARCH, ENEMY_SEARCH_DURATION)
+                self.reset_adaptive_search()
                 return
         
         # Chase toward player

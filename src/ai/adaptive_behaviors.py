@@ -9,6 +9,7 @@ import math
 from typing import List, Tuple, Optional, Dict
 
 from src.utils.grid import GridPos
+from src.core.logger import get_logger
 
 
 class AdaptiveMixin:
@@ -218,7 +219,7 @@ class AdaptiveSearchState:
         if hasattr(enemy, 'reset_search_memory'):
             enemy.reset_search_memory()
         
-        print(f"[AdaptiveSearch] Enemy entering adaptive search mode")
+        get_logger().debug("Enemy entering adaptive search mode")
     
     def update(self, enemy, player, maze, dt, game=None) -> Optional[str]:
         """
